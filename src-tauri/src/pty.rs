@@ -357,7 +357,7 @@ fn wrap_if_batch(resolved: PathBuf, args: &[String]) -> (String, Vec<String>) {
 ///
 /// In each dir, try `<name>` as-is first, then each extension in `PATHEXT`.
 #[cfg(windows)]
-fn which_windows(program: &str) -> Option<PathBuf> {
+pub(crate) fn which_windows(program: &str) -> Option<PathBuf> {
     let pathext = std::env::var("PATHEXT")
         .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
     let exts: Vec<String> = pathext
@@ -409,7 +409,7 @@ fn which_windows(program: &str) -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 #[allow(dead_code)]
-fn which_unix(program: &str) -> Option<PathBuf> {
+pub(crate) fn which_unix(program: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&path_var) {
         let cand = dir.join(program);

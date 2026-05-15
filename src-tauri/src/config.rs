@@ -5,13 +5,11 @@
 //!   - Linux:   `~/.config/opensplit/config.toml`
 //!   - macOS:   `~/Library/Application Support/opensplit/config.toml`
 //!
-//! On first launch we write a sensible default file the user can edit.
+//! On first launch we write a minimal config (no default_profile set), so the
+//! launcher picker shows. Once the user picks something with "Set as default",
+//! we persist it.
 
-use std::{
-    collections::HashMap,
-    fs,
-    path::{Path, PathBuf},
-};
+use std::{collections::HashMap, fs, path::PathBuf};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -19,22 +17,24 @@ use serde::{Deserialize, Serialize};
 /// Top-level config schema.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    /// Profile to use when `opensplit` is launched with no arguments.
-    #[serde(default = "default_profile_name")]
-    pub default_profile: String,
+    /// Profile to auto-launch when `opensplit` runs with no arguments.
+    ///
+    /// When `None`, the frontend shows the launcher picker instead of spawning
+    /// a pane immediately. The user can pick a tool (and optionally save it
+    /// as the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_profile: Option<String>,
 
     /// Inherit SSH session into newly-split panes when the source pane is in
     /// an `ssh` session.
     #[serde(default = "default_true")]
     pub ssh_inherit: bool,
 
-    /// Named profiles.
+    /// Named profiles. Empty by default; users add via Settings or by editing
+    /// the file directly. Detection in `detect.rs` knows about common tools
+    /// without requiring a profile entry.
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
-}
-
-fn default_profile_name() -> String {
-    "opencode".to_string()
 }
 
 fn default_true() -> bool {
@@ -58,51 +58,13 @@ pub struct Profile {
 }
 
 impl Config {
-    /// Reasonable defaults shipped on first run.
+    /// Minimal first-run config: no default, no profiles. The launcher picker
+    /// + detection layer surface available tools without needing entries here.
     pub fn defaults() -> Self {
-        let mut profiles = HashMap::new();
-
-        profiles.insert(
-            "opencode".to_string(),
-            Profile {
-                command: "opencode".to_string(),
-                args: vec![],
-                cwd: None,
-                env: HashMap::new(),
-            },
-        );
-        profiles.insert(
-            "codex".to_string(),
-            Profile {
-                command: "codex".to_string(),
-                args: vec![],
-                cwd: None,
-                env: HashMap::new(),
-            },
-        );
-        profiles.insert(
-            "claude".to_string(),
-            Profile {
-                command: "claude".to_string(),
-                args: vec![],
-                cwd: None,
-                env: HashMap::new(),
-            },
-        );
-        profiles.insert(
-            "shell".to_string(),
-            Profile {
-                command: default_shell(),
-                args: default_shell_args(),
-                cwd: None,
-                env: HashMap::new(),
-            },
-        );
-
         Self {
-            default_profile: "opencode".to_string(),
+            default_profile: None,
             ssh_inherit: true,
-            profiles,
+            profiles: HashMap::new(),
         }
     }
 
@@ -111,16 +73,7 @@ impl Config {
         let path = config_path().context("could not determine config dir")?;
         if !path.exists() {
             let defaults = Self::defaults();
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).ok();
-            }
-            let toml = toml::to_string_pretty(&defaults)
-                .context("failed to serialize default config")?;
-            let header = "# OpenSplit configuration.\n\
-                          # Generated on first launch; edit freely.\n\
-                          # See https://github.com/anomalyco/opensplit for docs.\n\n";
-            fs::write(&path, format!("{header}{toml}"))
-                .with_context(|| format!("writing default config to {}", path.display()))?;
+            save_to_disk(&path, &defaults)?;
             tracing::info!(path = %path.display(), "wrote default config");
             return Ok(defaults);
         }
@@ -130,6 +83,26 @@ impl Config {
             .with_context(|| format!("parsing {}", path.display()))?;
         Ok(parsed)
     }
+
+    /// Persist this config to disk, overwriting any existing file.
+    pub fn save(&self) -> Result<PathBuf> {
+        let path = config_path().context("could not determine config dir")?;
+        save_to_disk(&path, self)?;
+        Ok(path)
+    }
+}
+
+fn save_to_disk(path: &PathBuf, cfg: &Config) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    let toml = toml::to_string_pretty(cfg).context("failed to serialize config")?;
+    let header = "# OpenSplit configuration.\n\
+                  # Auto-generated; edit freely or use the in-app Settings panel.\n\
+                  # https://github.com/flashosophy/OpenSplit\n\n";
+    fs::write(path, format!("{header}{toml}"))
+        .with_context(|| format!("writing config to {}", path.display()))?;
+    Ok(())
 }
 
 /// Resolved spec ready to hand to the PTY layer.
@@ -141,41 +114,6 @@ pub struct LaunchSpec {
     pub env: HashMap<String, String>,
     /// Profile name this was derived from, or `null` for raw commands.
     pub profile: Option<String>,
-}
-
-/// Decide what to launch in the very first pane based on CLI args + config.
-pub fn resolve_initial_launch(
-    config: &Config,
-    cli_profile: Option<&str>,
-    raw: &[String],
-) -> LaunchSpec {
-    if !raw.is_empty() {
-        return LaunchSpec {
-            command: raw[0].clone(),
-            args: raw[1..].to_vec(),
-            cwd: None,
-            env: HashMap::new(),
-            profile: None,
-        };
-    }
-    let name = cli_profile.unwrap_or(&config.default_profile);
-    if let Some(p) = config.profiles.get(name) {
-        return LaunchSpec {
-            command: p.command.clone(),
-            args: p.args.clone(),
-            cwd: p.cwd.clone(),
-            env: p.env.clone(),
-            profile: Some(name.to_string()),
-        };
-    }
-    // Profile name didn't match; treat it as a raw command.
-    LaunchSpec {
-        command: name.to_string(),
-        args: vec![],
-        cwd: None,
-        env: HashMap::new(),
-        profile: None,
-    }
 }
 
 /// Look up a profile by name and convert to a `LaunchSpec`. Returns `None` if
@@ -190,49 +128,33 @@ pub fn profile_to_spec(config: &Config, name: &str) -> Option<LaunchSpec> {
     })
 }
 
-fn config_path() -> Option<PathBuf> {
+/// Construct a `LaunchSpec` from a detected tool (catalog entry). When the
+/// user has a profile of the same name we prefer that (so their custom args
+/// win); otherwise we synthesize one from the detection result.
+pub fn spec_for_detected(
+    config: &Config,
+    name: &str,
+    resolved_path: Option<&str>,
+) -> LaunchSpec {
+    if let Some(spec) = profile_to_spec(config, name) {
+        return spec;
+    }
+    LaunchSpec {
+        // Prefer the resolved absolute path when we have it (more reliable
+        // than relying on PATH at spawn time, especially for GUI launches).
+        command: resolved_path
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| name.to_string()),
+        args: vec![],
+        cwd: None,
+        env: HashMap::new(),
+        profile: Some(name.to_string()),
+    }
+}
+
+/// Returns the platform config file path (creating the parent dir is left to
+/// callers that actually write to it).
+pub fn config_path() -> Option<PathBuf> {
     let dir = dirs::config_dir()?;
     Some(dir.join("opensplit").join("config.toml"))
 }
-
-#[cfg(windows)]
-fn default_shell() -> String {
-    // Prefer PowerShell 7 if present, else Windows PowerShell, else cmd.
-    if which("pwsh.exe").is_some() {
-        "pwsh.exe".into()
-    } else if which("powershell.exe").is_some() {
-        "powershell.exe".into()
-    } else {
-        "cmd.exe".into()
-    }
-}
-
-#[cfg(windows)]
-fn default_shell_args() -> Vec<String> {
-    Vec::new()
-}
-
-#[cfg(not(windows))]
-fn default_shell() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".into())
-}
-
-#[cfg(not(windows))]
-fn default_shell_args() -> Vec<String> {
-    vec!["-l".into()]
-}
-
-#[cfg(windows)]
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let candidate = dir.join(name);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-#[allow(dead_code)]
-fn _unused(_: &Path) {}

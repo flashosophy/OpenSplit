@@ -2,14 +2,18 @@
   import { onMount } from "svelte";
   import PaneView from "./PaneView.svelte";
   import ContextMenu from "./ContextMenu.svelte";
+  import LauncherPicker from "./LauncherPicker.svelte";
+  import SettingsPanel from "./SettingsPanel.svelte";
   import {
-    getInitialLaunch,
-    listProfiles,
-    spawnPane,
     closePane,
+    getStartupAction,
     resolveSplitSpec,
+    setDefaultProfile,
+    spawnPane,
+    type DetectedTool,
     type LaunchSpec,
-    type ProfileSummary,
+    type SpawnSource,
+    type StartupAction,
   } from "../lib/ipc";
   import {
     findLeafByPaneId,
@@ -18,54 +22,71 @@
     removeLeaf,
     setRatio,
     splitLeaf,
-    type Leaf,
     type PaneNode,
     type SplitDirection,
   } from "../lib/PaneTree";
 
   let tree = $state<PaneNode | null>(null);
   let focusedPaneId = $state<string | null>(null);
-  let profiles = $state<ProfileSummary[]>([]);
-  let initialLaunch = $state<LaunchSpec | null>(null);
   let booting = $state(true);
   let bootError = $state<string | null>(null);
 
-  let ctxMenu = $state<{
-    x: number;
-    y: number;
-    paneId: string;
-  } | null>(null);
+  /** When non-null, we're showing the launcher picker instead of a tree. */
+  let pickerTools = $state<DetectedTool[] | null>(null);
 
-  // Approximate cell size: we don't measure until xterm mounts, so use 80x24
-  // as a safe initial PTY size. xterm.js's FitAddon will resize immediately
-  // after mount via the Terminal component.
+  /** Settings panel visibility (overlay; works in either picker or tree state). */
+  let showSettings = $state(false);
+
+  let ctxMenu = $state<{ x: number; y: number; paneId: string } | null>(null);
+
   const INITIAL_COLS = 100;
   const INITIAL_ROWS = 30;
 
   onMount(async () => {
     try {
-      const [launch, profs] = await Promise.all([
-        getInitialLaunch(),
-        listProfiles(),
-      ]);
-      initialLaunch = launch;
-      profiles = profs;
-
-      const result = await spawnPane(
-        { kind: "initial" },
-        INITIAL_COLS,
-        INITIAL_ROWS,
-      );
-      const title = launch.profile ?? launch.command;
-      tree = makeLeaf(result.pane_id, launch.profile, title);
-      focusedPaneId = result.pane_id;
+      const action: StartupAction = await getStartupAction();
+      if (action.kind === "launch") {
+        await spawnFromSpec(action.spec);
+      } else {
+        pickerTools = action.detected;
+      }
     } catch (e) {
       bootError = String(e);
-      console.error("boot failed", e);
+      console.error("[opensplit] boot failed", e);
     } finally {
       booting = false;
     }
   });
+
+  async function spawnFromSource(source: SpawnSource, title: string) {
+    const result = await spawnPane(source, INITIAL_COLS, INITIAL_ROWS);
+    tree = makeLeaf(result.pane_id, result.spec.profile, title);
+    focusedPaneId = result.pane_id;
+  }
+
+  async function spawnFromSpec(spec: LaunchSpec) {
+    const title = spec.profile ?? spec.command;
+    await spawnFromSource({ kind: "spec", spec }, title);
+  }
+
+  async function pickFromLauncher(tool: DetectedTool, setAsDefault: boolean) {
+    try {
+      if (setAsDefault) {
+        try {
+          await setDefaultProfile(tool.name);
+        } catch (e) {
+          console.warn("[opensplit] could not save default", e);
+        }
+      }
+      pickerTools = null;
+      await spawnFromSource({ kind: "detected", name: tool.name }, tool.label);
+    } catch (e) {
+      bootError = `Failed to launch ${tool.label}: ${e}`;
+      console.error("[opensplit] picker launch failed", e);
+      // Re-show picker so the user can pick something else.
+      pickerTools = pickerTools ?? [];
+    }
+  }
 
   function focusPane(paneId: string) {
     focusedPaneId = paneId;
@@ -88,10 +109,7 @@
     if (!sourceLeaf) return;
 
     try {
-      const resolved = await resolveSplitSpec(
-        sourcePaneId,
-        sourceLeaf.profile,
-      );
+      const resolved = await resolveSplitSpec(sourcePaneId, sourceLeaf.profile);
       const spawned = await spawnPane(
         { kind: "spec", spec: resolved.spec },
         INITIAL_COLS,
@@ -108,7 +126,7 @@
       tree = splitLeaf(tree, sourceLeaf.id, direction, newLeaf);
       focusedPaneId = spawned.pane_id;
     } catch (e) {
-      console.error("split failed", e);
+      console.error("[opensplit] split failed", e);
     }
   }
 
@@ -117,19 +135,30 @@
     try {
       await closePane(paneId);
     } catch (e) {
-      console.warn("close_pane error", e);
+      console.warn("[opensplit] close_pane error", e);
     }
     const leaf = findLeafByPaneId(tree, paneId);
     if (!leaf) return;
     const next = removeLeaf(tree, leaf.id);
     tree = next;
     if (next === null) {
-      // Last pane closed → close the window.
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      await getCurrentWindow().close();
+      // Last pane closed → return to picker instead of closing the window.
+      // This is friendlier when the user opened the app intentionally.
+      try {
+        const action = await getStartupAction();
+        if (action.kind === "picker") {
+          pickerTools = action.detected;
+        } else {
+          // Default is set; relaunch it.
+          await spawnFromSpec(action.spec);
+        }
+      } catch (e) {
+        console.error("[opensplit] post-close re-init failed", e);
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        await getCurrentWindow().close();
+      }
       return;
     }
-    // Refocus first remaining leaf.
     const remaining = leaves(next);
     focusedPaneId = remaining[0]?.paneId ?? null;
   }
@@ -139,17 +168,22 @@
     tree = setRatio(tree, splitId, ratio);
   }
 
-  // Keyboard shortcuts ----------------------------------------------------
   function onKeydown(ev: KeyboardEvent) {
+    // Ctrl+, opens settings (common convention).
+    if (ev.ctrlKey && ev.key === ",") {
+      ev.preventDefault();
+      showSettings = true;
+      return;
+    }
     if (!focusedPaneId) return;
     const mod = ev.ctrlKey && ev.shiftKey;
     if (!mod) return;
     if (ev.key === "H" || ev.key === "h") {
       ev.preventDefault();
-      performSplit(focusedPaneId, "v"); // horizontal divider = vertical stack
+      performSplit(focusedPaneId, "v"); // horizontal divider = stacked
     } else if (ev.key === "V" || ev.key === "v") {
       ev.preventDefault();
-      performSplit(focusedPaneId, "h"); // vertical divider = horizontal layout
+      performSplit(focusedPaneId, "h");
     } else if (ev.key === "W" || ev.key === "w") {
       ev.preventDefault();
       performClose(focusedPaneId);
@@ -162,16 +196,14 @@
 <main class="root">
   {#if booting}
     <div class="boot">Starting OpenSplit…</div>
-  {:else if bootError}
+  {:else if bootError && !pickerTools}
     <div class="boot error">
       <h2>Failed to start</h2>
       <pre>{bootError}</pre>
-      <p>
-        Check that the configured profile's command exists on your PATH.
-        Initial command:
-        <code>{initialLaunch?.command} {initialLaunch?.args.join(" ")}</code>
-      </p>
+      <button onclick={() => location.reload()}>Retry</button>
     </div>
+  {:else if pickerTools !== null}
+    <LauncherPicker detected={pickerTools} onPick={pickFromLauncher} />
   {:else if tree}
     <PaneView
       node={tree}
@@ -180,6 +212,29 @@
       onContextMenu={openContextMenu}
       onSplitterDrag={onSplitterDrag}
     />
+  {/if}
+
+  <!-- Floating gear (top-right). Always visible once boot finishes. -->
+  {#if !booting}
+    <button
+      class="gear"
+      type="button"
+      title="Settings (Ctrl+,)"
+      aria-label="Settings"
+      onclick={() => (showSettings = true)}
+    >
+      <svg viewBox="0 0 24 24" width="18" height="18">
+        <path
+          d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8.4 3.5c0 .5-.1 1-.2 1.5l2.1 1.6-2 3.4-2.5-.9c-.7.6-1.6 1-2.5 1.4l-.4 2.6h-4l-.4-2.6c-.9-.3-1.7-.8-2.5-1.4l-2.5.9-2-3.4 2.1-1.6c-.1-.5-.2-1-.2-1.5s.1-1 .2-1.5L3.5 8.9l2-3.4 2.5.9c.8-.6 1.6-1.1 2.5-1.4L10.9 2h4l.4 2.6c.9.3 1.8.8 2.5 1.4l2.5-.9 2 3.4-2.1 1.6c.1.5.2 1 .2 1.5z"
+          fill="none" stroke="currentColor" stroke-width="1.3"
+          stroke-linejoin="round"
+        />
+      </svg>
+    </button>
+  {/if}
+
+  {#if showSettings}
+    <SettingsPanel onClose={() => (showSettings = false)} />
   {/if}
 
   {#if ctxMenu}
@@ -227,6 +282,7 @@
     padding: 24px;
     text-align: left;
     align-items: flex-start;
+    gap: 12px;
   }
   .boot.error pre {
     background: var(--bg-elev);
@@ -235,5 +291,30 @@
     color: var(--fg);
     max-width: 100%;
     overflow: auto;
+    white-space: pre-wrap;
+  }
+
+  .gear {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    z-index: 700;
+    width: 30px;
+    height: 30px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(22, 22, 26, 0.7);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg-dim);
+    cursor: pointer;
+    padding: 0;
+    backdrop-filter: blur(4px);
+  }
+  .gear:hover {
+    color: var(--fg);
+    border-color: var(--border-active);
+    background: var(--bg-elev);
   }
 </style>

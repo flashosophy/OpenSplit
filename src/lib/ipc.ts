@@ -15,6 +15,26 @@ export interface ProfileSummary {
   args: string[];
 }
 
+export interface DetectedTool {
+  name: string;
+  label: string;
+  description: string;
+  icon: string;            // "ai" | "terminal" | "custom"
+  path: string | null;
+  builtin: boolean;
+  has_profile: boolean;
+}
+
+export type StartupAction =
+  | { kind: "launch"; spec: LaunchSpec }
+  | { kind: "picker"; detected: DetectedTool[]; no_ai_tools: boolean };
+
+export interface ConfigSnapshot {
+  default_profile: string | null;
+  ssh_inherit: boolean;
+  config_path: string | null;
+}
+
 export interface ForegroundInfo {
   pid: number;
   name: string;
@@ -35,17 +55,37 @@ export interface ResolveSplitSpecResult {
 }
 
 export type SpawnSource =
-  | { kind: "initial" }
+  | { kind: "detected"; name: string }
   | { kind: "profile"; name: string }
   | { kind: "spec"; spec: LaunchSpec };
 
-export function getInitialLaunch(): Promise<LaunchSpec> {
-  return invoke("get_initial_launch");
+// Startup / detection ---------------------------------------------------------
+
+export function getStartupAction(): Promise<StartupAction> {
+  return invoke("get_startup_action");
+}
+
+export function detectTools(): Promise<DetectedTool[]> {
+  return invoke("detect_tools");
 }
 
 export function listProfiles(): Promise<ProfileSummary[]> {
   return invoke("list_profiles");
 }
+
+export function getConfig(): Promise<ConfigSnapshot> {
+  return invoke("get_config");
+}
+
+export function setDefaultProfile(name: string | null): Promise<ConfigSnapshot> {
+  return invoke("set_default_profile", { args: { name } });
+}
+
+export function setSshInherit(enabled: boolean): Promise<ConfigSnapshot> {
+  return invoke("set_ssh_inherit", { args: { enabled } });
+}
+
+// PTY -------------------------------------------------------------------------
 
 export function spawnPane(
   source: SpawnSource,

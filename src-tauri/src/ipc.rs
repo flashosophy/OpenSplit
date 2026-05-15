@@ -11,6 +11,7 @@ use tauri::{AppHandle, State};
 
 use crate::{
     config::{self, Config, LaunchSpec},
+    detect::{self, DetectedTool},
     pty::{self, PaneRegistry},
     session,
 };
@@ -18,32 +19,114 @@ use crate::{
 /// Process-wide state managed by Tauri.
 pub struct AppState {
     pub config: parking_lot::RwLock<Config>,
-    pub initial_launch: LaunchSpec,
+    /// CLI-provided override: `Some(name)` from positional arg, or raw command
+    /// from `-- cmd ...`. When set, the launcher picker is skipped.
+    pub cli_override: parking_lot::RwLock<Option<CliOverride>>,
     pub panes: PaneRegistry,
 }
 
+#[derive(Debug, Clone)]
+pub enum CliOverride {
+    /// User typed `opensplit <name>`.
+    Profile(String),
+    /// User typed `opensplit -- cmd args...`.
+    Raw(LaunchSpec),
+}
+
 impl AppState {
-    pub fn new(config: Config, initial_launch: LaunchSpec) -> Self {
+    pub fn new(config: Config, cli_override: Option<CliOverride>) -> Self {
         Self {
             config: parking_lot::RwLock::new(config),
-            initial_launch,
+            cli_override: parking_lot::RwLock::new(cli_override),
             panes: PaneRegistry::default(),
         }
     }
 }
 
-/// Wrapper to convert anyhow errors into something Tauri/serde-friendly.
 fn err<E: std::fmt::Display>(e: E) -> String {
     e.to_string()
 }
 
 // ---------------------------------------------------------------------------
-// Read-only / metadata commands
+// Startup
 // ---------------------------------------------------------------------------
 
+/// What the frontend should do on app start.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StartupAction {
+    /// Skip the picker and immediately spawn this spec.
+    Launch { spec: LaunchSpec },
+    /// Show the picker.
+    Picker {
+        detected: Vec<DetectedTool>,
+        /// True if no AI-category tools were detected. UI may use this to
+        /// emphasize the shell button or fall back to it after a timeout.
+        no_ai_tools: bool,
+    },
+}
+
 #[tauri::command]
-pub fn get_initial_launch(state: State<'_, Arc<AppState>>) -> LaunchSpec {
-    state.initial_launch.clone()
+pub fn get_startup_action(state: State<'_, Arc<AppState>>) -> StartupAction {
+    let cfg = state.config.read();
+
+    // 1. CLI override always wins.
+    if let Some(over) = state.cli_override.read().clone() {
+        match over {
+            CliOverride::Raw(spec) => return StartupAction::Launch { spec },
+            CliOverride::Profile(name) => {
+                let spec = config::profile_to_spec(&cfg, &name).unwrap_or_else(|| {
+                    // Synthesize: treat unknown name as bare command.
+                    LaunchSpec {
+                        command: name.clone(),
+                        args: vec![],
+                        cwd: None,
+                        env: Default::default(),
+                        profile: None,
+                    }
+                });
+                return StartupAction::Launch { spec };
+            }
+        }
+    }
+
+    // 2. Configured default profile, if it exists.
+    if let Some(name) = &cfg.default_profile {
+        // Try profile first, then synthesize from detection so users can set
+        // a default like "claude" without manually adding a profile entry.
+        if let Some(spec) = config::profile_to_spec(&cfg, name) {
+            return StartupAction::Launch { spec };
+        }
+        let detected = detect::detect_all(&cfg.profiles);
+        if let Some(tool) = detected.iter().find(|t| &t.name == name) {
+            let spec = config::spec_for_detected(&cfg, name, tool.path.as_deref());
+            return StartupAction::Launch { spec };
+        }
+        tracing::warn!(
+            "default_profile `{name}` not found in profiles or detection; showing picker"
+        );
+    }
+
+    // 3. No default → show picker. If literally no AI tools, picker still
+    //    shows but UI may opt to auto-fall-through to shell.
+    let detected = detect::detect_all(&cfg.profiles);
+    let no_ai = !detect::any_ai_tool_detected(&detected);
+    StartupAction::Picker {
+        detected,
+        no_ai_tools: no_ai,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Detection + profiles
+// ---------------------------------------------------------------------------
+
+/// Re-scan PATH for installed tools. Called by the Settings panel's refresh
+/// button after the user installs new software.
+#[tauri::command]
+pub fn detect_tools(state: State<'_, Arc<AppState>>) -> Vec<DetectedTool> {
+    let cfg = state.config.read();
+    detect::detect_all(&cfg.profiles)
 }
 
 #[derive(Debug, Serialize)]
@@ -69,17 +152,70 @@ pub fn list_profiles(state: State<'_, Arc<AppState>>) -> Vec<ProfileSummary> {
     out
 }
 
+#[derive(Debug, Serialize)]
+pub struct ConfigSnapshot {
+    pub default_profile: Option<String>,
+    pub ssh_inherit: bool,
+    pub config_path: Option<String>,
+}
+
+#[tauri::command]
+pub fn get_config(state: State<'_, Arc<AppState>>) -> ConfigSnapshot {
+    let cfg = state.config.read();
+    ConfigSnapshot {
+        default_profile: cfg.default_profile.clone(),
+        ssh_inherit: cfg.ssh_inherit,
+        config_path: config::config_path().map(|p| p.display().to_string()),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetDefaultProfileArgs {
+    /// `None` clears the default (so picker shows on next launch).
+    pub name: Option<String>,
+}
+
+#[tauri::command]
+pub fn set_default_profile(
+    state: State<'_, Arc<AppState>>,
+    args: SetDefaultProfileArgs,
+) -> Result<ConfigSnapshot, String> {
+    {
+        let mut cfg = state.config.write();
+        cfg.default_profile = args.name;
+        cfg.save().map_err(err)?;
+    }
+    Ok(get_config(state))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetSshInheritArgs {
+    pub enabled: bool,
+}
+
+#[tauri::command]
+pub fn set_ssh_inherit(
+    state: State<'_, Arc<AppState>>,
+    args: SetSshInheritArgs,
+) -> Result<ConfigSnapshot, String> {
+    {
+        let mut cfg = state.config.write();
+        cfg.ssh_inherit = args.enabled;
+        cfg.save().map_err(err)?;
+    }
+    Ok(get_config(state))
+}
+
 // ---------------------------------------------------------------------------
 // PTY lifecycle
 // ---------------------------------------------------------------------------
 
-/// Arguments for `spawn_pane`.
 #[derive(Debug, Deserialize)]
 pub struct SpawnPaneArgs {
     /// One of:
-    /// - `{ kind: "profile", name }`     → look up profile by name
-    /// - `{ kind: "spec", spec }`        → use a pre-resolved spec (used for SSH inheritance)
-    /// - `{ kind: "initial" }`           → use the spec resolved from CLI at startup
+    /// - `{ kind: "detected", name }` → look up by detection name
+    /// - `{ kind: "profile",  name }` → look up profile by name
+    /// - `{ kind: "spec",     spec }` → use a pre-resolved spec (used for SSH inheritance)
     pub source: SpawnSource,
     pub cols: u16,
     pub rows: u16,
@@ -88,7 +224,7 @@ pub struct SpawnPaneArgs {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpawnSource {
-    Initial,
+    Detected { name: String },
     Profile { name: String },
     Spec { spec: LaunchSpec },
 }
@@ -96,7 +232,6 @@ pub enum SpawnSource {
 #[derive(Debug, Serialize)]
 pub struct SpawnPaneResult {
     pub pane_id: String,
-    /// Echoed back so the frontend can label the pane.
     pub spec: LaunchSpec,
 }
 
@@ -106,14 +241,21 @@ pub fn spawn_pane(
     state: State<'_, Arc<AppState>>,
     args: SpawnPaneArgs,
 ) -> Result<SpawnPaneResult, String> {
-    let spec = match args.source {
-        SpawnSource::Initial => state.initial_launch.clone(),
-        SpawnSource::Profile { name } => {
-            let cfg = state.config.read();
-            config::profile_to_spec(&cfg, &name)
-                .ok_or_else(|| format!("no such profile: {name}"))?
+    let spec = {
+        let cfg = state.config.read();
+        match args.source {
+            SpawnSource::Detected { name } => {
+                let detected = detect::detect_all(&cfg.profiles);
+                let tool = detected
+                    .iter()
+                    .find(|t| t.name == name)
+                    .ok_or_else(|| format!("detected tool `{name}` not found"))?;
+                config::spec_for_detected(&cfg, &name, tool.path.as_deref())
+            }
+            SpawnSource::Profile { name } => config::profile_to_spec(&cfg, &name)
+                .ok_or_else(|| format!("no such profile: {name}"))?,
+            SpawnSource::Spec { spec } => spec,
         }
-        SpawnSource::Spec { spec } => spec,
     };
     let pane = pty::spawn(&app, spec.clone(), args.cols.max(1), args.rows.max(1)).map_err(err)?;
     let id = pane.id.clone();
@@ -193,7 +335,6 @@ pub fn pane_foreground_info(
 
 #[derive(Debug, Deserialize)]
 pub struct ResolveSplitSpecArgs {
-    /// The pane being split. Used to detect a live SSH session.
     pub source_pane_id: String,
     /// Optional profile to fall back to if SSH isn't detected (or inherit is off).
     pub fallback_profile: Option<String>,
@@ -202,9 +343,7 @@ pub struct ResolveSplitSpecArgs {
 #[derive(Debug, Serialize)]
 pub struct ResolveSplitSpecResult {
     pub spec: LaunchSpec,
-    /// True if we ended up inheriting SSH from the source.
     pub inherited_ssh: bool,
-    /// Foreground info we used to decide, for UI display.
     pub source_foreground: Option<session::ForegroundInfo>,
 }
 
@@ -216,16 +355,34 @@ pub fn resolve_split_spec(
     let cfg = state.config.read();
     let inherit_enabled = cfg.ssh_inherit;
 
-    // Build the fallback spec first.
     let fallback = if let Some(name) = args.fallback_profile.as_deref() {
-        config::profile_to_spec(&cfg, name).unwrap_or_else(|| state.initial_launch.clone())
+        // Try profile, then detection, then source pane's own spec.
+        if let Some(s) = config::profile_to_spec(&cfg, name) {
+            s
+        } else {
+            let detected = detect::detect_all(&cfg.profiles);
+            if let Some(tool) = detected.iter().find(|t| t.name == name) {
+                config::spec_for_detected(&cfg, name, tool.path.as_deref())
+            } else {
+                state
+                    .panes
+                    .get(&args.source_pane_id)
+                    .map(|p| p.spec().clone())
+                    .unwrap_or_else(|| LaunchSpec {
+                        command: name.to_string(),
+                        args: vec![],
+                        cwd: None,
+                        env: Default::default(),
+                        profile: None,
+                    })
+            }
+        }
     } else {
-        // Try to reuse the source pane's spec; else initial.
         state
             .panes
             .get(&args.source_pane_id)
             .map(|p| p.spec().clone())
-            .unwrap_or_else(|| state.initial_launch.clone())
+            .ok_or_else(|| format!("unknown source pane {}", args.source_pane_id))?
     };
 
     if !inherit_enabled {
@@ -236,7 +393,6 @@ pub fn resolve_split_spec(
         });
     }
 
-    // Detect foreground process in source.
     let fg = state
         .panes
         .get(&args.source_pane_id)
