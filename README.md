@@ -57,10 +57,13 @@ opensplit -- bash -l     # raw command, no profile
 
 Inside a pane:
 
-- **Right-click** → split horizontally / split vertically / close pane
+- **Right-click** → copy / paste / split horizontal / split vertical / close
 - **Drag a splitter border** to resize
-- **Ctrl+Shift+H / Ctrl+Shift+V** to split via keyboard
-- **Ctrl+Shift+W** to close the focused pane
+- **Ctrl+Shift+C** copy selection · **Ctrl+Shift+V** paste
+- **Ctrl+Shift+H** (or `-`) split horizontal — divider runs horizontally, panes stacked
+- **Ctrl+Shift+E** (or `|`) split vertical — divider runs vertically, panes side by side
+- **Ctrl+Shift+W** close focused pane
+- **Ctrl+,** open Settings
 
 ## Configuration
 

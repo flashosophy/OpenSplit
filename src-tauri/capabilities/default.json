@@ -9,6 +9,8 @@
     "core:event:default",
     "core:webview:default",
     "core:app:default",
-    "os:default"
+    "os:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text"
   ]
 }

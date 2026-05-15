@@ -10,6 +10,11 @@
     resizePane,
     writePane,
   } from "../lib/ipc";
+  import {
+    registerTerminal,
+    unregisterTerminal,
+    type TerminalHandle,
+  } from "../lib/terminalRegistry";
   import type { UnlistenFn } from "@tauri-apps/api/event";
 
   interface Props {
@@ -160,6 +165,48 @@
       return;
     }
 
+    // Expose a handle so App.svelte can read selections / push pastes for
+    // this pane. The registry maps paneId → handle; Terminal owns the
+    // lifetime via onDestroy.
+    const handle: TerminalHandle = {
+      getSelection() {
+        if (disposed || !term) return "";
+        try {
+          return term.getSelection();
+        } catch {
+          return "";
+        }
+      },
+      clearSelection() {
+        if (disposed || !term) return;
+        try {
+          term.clearSelection();
+        } catch {
+          /* ignore */
+        }
+      },
+      paste(text: string) {
+        if (disposed || !term || !text) return;
+        try {
+          // term.paste() emits bracketed-paste markers when the app has
+          // them enabled (most modern shells/editors do), so multi-line
+          // pastes don't get auto-executed line by line.
+          term.paste(text);
+        } catch (e) {
+          console.warn("[opensplit] term.paste threw", e);
+        }
+      },
+      focus() {
+        if (disposed || !term) return;
+        try {
+          term.focus();
+        } catch {
+          /* ignore */
+        }
+      },
+    };
+    registerTerminal(paneId, handle);
+
     // Flush any buffered output.
     for (const chunk of earlyChunks) safeTermWrite(chunk);
     earlyChunks.length = 0;
@@ -184,6 +231,8 @@
   onDestroy(() => {
     // Flip the flag FIRST so any in-flight callback bails before touching DOM.
     disposed = true;
+    // Drop registry entry so App.svelte can no longer route copy/paste here.
+    unregisterTerminal(paneId);
     if (resizeRaf) cancelAnimationFrame(resizeRaf);
     resizeRaf = 0;
     try {

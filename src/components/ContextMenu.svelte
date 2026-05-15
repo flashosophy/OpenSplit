@@ -2,12 +2,24 @@
   interface Props {
     x: number;
     y: number;
+    hasSelection: boolean;
+    onCopy: () => void;
+    onPaste: () => void;
     onSplitHorizontal: () => void;
     onSplitVertical: () => void;
     onClose: () => void;
   }
 
-  let { x, y, onSplitHorizontal, onSplitVertical, onClose }: Props = $props();
+  let {
+    x,
+    y,
+    hasSelection,
+    onCopy,
+    onPaste,
+    onSplitHorizontal,
+    onSplitVertical,
+    onClose,
+  }: Props = $props();
 </script>
 
 <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -19,6 +31,39 @@
   onclick={(e) => e.stopPropagation()}
   oncontextmenu={(e) => e.preventDefault()}
 >
+  <button
+    class="item"
+    onclick={onCopy}
+    type="button"
+    disabled={!hasSelection}
+  >
+    <span class="icon" aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="16" height="16">
+        <rect x="4" y="2" width="9" height="11" rx="1.2"
+          fill="none" stroke="currentColor" stroke-width="1.2" />
+        <rect x="2" y="4" width="9" height="11" rx="1.2"
+          fill="var(--menu-bg)" stroke="currentColor" stroke-width="1.2" />
+      </svg>
+    </span>
+    <span class="label">Copy</span>
+    <span class="shortcut">Ctrl+Shift+C</span>
+  </button>
+
+  <button class="item" onclick={onPaste} type="button">
+    <span class="icon" aria-hidden="true">
+      <svg viewBox="0 0 16 16" width="16" height="16">
+        <rect x="3" y="3" width="10" height="11" rx="1.2"
+          fill="none" stroke="currentColor" stroke-width="1.2" />
+        <rect x="5.5" y="1.5" width="5" height="2.5" rx="0.6"
+          fill="var(--menu-bg)" stroke="currentColor" stroke-width="1.2" />
+      </svg>
+    </span>
+    <span class="label">Paste</span>
+    <span class="shortcut">Ctrl+Shift+V</span>
+  </button>
+
+  <div class="sep"></div>
+
   <button class="item" onclick={onSplitHorizontal} type="button">
     <span class="icon" aria-hidden="true">
       <!-- horizontal divider icon: a box split top/bottom -->
@@ -46,7 +91,7 @@
       </svg>
     </span>
     <span class="label">Split Vertical</span>
-    <span class="shortcut">Ctrl+Shift+V</span>
+    <span class="shortcut">Ctrl+Shift+E</span>
   </button>
 
   <div class="sep"></div>
@@ -89,8 +134,12 @@
     text-align: left;
     cursor: pointer;
   }
-  .item:hover {
+  .item:hover:not(:disabled) {
     background: var(--menu-hover);
+  }
+  .item:disabled {
+    opacity: 0.4;
+    cursor: default;
   }
   .item.danger {
     color: var(--danger);
@@ -101,7 +150,7 @@
     justify-content: center;
     color: var(--fg-dim);
   }
-  .item:hover .icon {
+  .item:hover:not(:disabled) .icon {
     color: inherit;
   }
   .label {

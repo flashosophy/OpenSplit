@@ -15,6 +15,8 @@
     type SpawnSource,
     type StartupAction,
   } from "../lib/ipc";
+  import { copyText, pasteText } from "../lib/clipboard";
+  import { getTerminal } from "../lib/terminalRegistry";
   import {
     findLeafByPaneId,
     leaves,
@@ -37,7 +39,12 @@
   /** Settings panel visibility (overlay; works in either picker or tree state). */
   let showSettings = $state(false);
 
-  let ctxMenu = $state<{ x: number; y: number; paneId: string } | null>(null);
+  let ctxMenu = $state<{
+    x: number;
+    y: number;
+    paneId: string;
+    hasSelection: boolean;
+  } | null>(null);
 
   const INITIAL_COLS = 100;
   const INITIAL_ROWS = 30;
@@ -96,7 +103,12 @@
     ev.preventDefault();
     ev.stopPropagation();
     focusedPaneId = paneId;
-    ctxMenu = { x: ev.clientX, y: ev.clientY, paneId };
+    // Capture selection at menu-open time. If the user right-clicks while
+    // text is selected, Copy should be enabled even though clicking the
+    // menu item happens after focus shifts.
+    const t = getTerminal(paneId);
+    const hasSelection = !!t && t.getSelection().length > 0;
+    ctxMenu = { x: ev.clientX, y: ev.clientY, paneId, hasSelection };
   }
 
   function closeContextMenu() {
@@ -168,6 +180,48 @@
     tree = setRatio(tree, splitId, ratio);
   }
 
+  /**
+   * Copy the focused pane's xterm selection to the system clipboard.
+   * Falls back silently when nothing is selected — that's what every terminal
+   * emulator does. The caller decides whether to also send Ctrl+C to the PTY
+   * (no, we explicitly don't, because the user pressed Ctrl+SHIFT+C precisely
+   * to avoid interrupting the running program).
+   */
+  async function performCopy(paneId: string): Promise<boolean> {
+    const t = getTerminal(paneId);
+    if (!t) return false;
+    const sel = t.getSelection();
+    if (!sel) return false;
+    try {
+      await copyText(sel);
+      return true;
+    } catch (e) {
+      console.warn("[opensplit] clipboard write failed", e);
+      return false;
+    }
+  }
+
+  /**
+   * Read the system clipboard and stuff it into the focused pane's PTY.
+   * Uses xterm's `paste()` which emits bracketed-paste markers when the
+   * remote app supports them — so multi-line clipboard content won't
+   * auto-execute in a shell that's bracketed-paste-aware.
+   */
+  async function performPaste(paneId: string): Promise<boolean> {
+    const t = getTerminal(paneId);
+    if (!t) return false;
+    let text: string;
+    try {
+      text = await pasteText();
+    } catch (e) {
+      console.warn("[opensplit] clipboard read failed", e);
+      return false;
+    }
+    if (!text) return false;
+    t.paste(text);
+    return true;
+  }
+
   function onKeydown(ev: KeyboardEvent) {
     // Ctrl+, opens settings (common convention).
     if (ev.ctrlKey && ev.key === ",") {
@@ -178,13 +232,37 @@
     if (!focusedPaneId) return;
     const mod = ev.ctrlKey && ev.shiftKey;
     if (!mod) return;
-    if (ev.key === "H" || ev.key === "h") {
+
+    // Normalize to lowercase since Shift makes ev.key uppercase on letters.
+    const k = ev.key.toLowerCase();
+
+    // IMPORTANT: preventDefault + stopPropagation BEFORE awaiting anything,
+    // so xterm's own keydown listener on the focused pane doesn't also see
+    // the keystroke and send it to the PTY as e.g. ^C.
+    //
+    // Shortcut map (Ctrl+Shift+...):
+    //   C            copy selection
+    //   V            paste
+    //   H or -       split with horizontal divider (panes stacked)
+    //   E or |       split with vertical divider   (panes side by side)
+    //   W            close focused pane
+    // Note: Ctrl+Shift+V used to be "split vertical". It now pastes, which is
+    // the universal terminal-emulator convention. Use E (or |) for vertical.
+    if (k === "c") {
       ev.preventDefault();
-      performSplit(focusedPaneId, "v"); // horizontal divider = stacked
-    } else if (ev.key === "V" || ev.key === "v") {
+      ev.stopPropagation();
+      void performCopy(focusedPaneId);
+    } else if (k === "v") {
       ev.preventDefault();
-      performSplit(focusedPaneId, "h");
-    } else if (ev.key === "W" || ev.key === "w") {
+      ev.stopPropagation();
+      void performPaste(focusedPaneId);
+    } else if (k === "h" || ev.key === "_" || ev.key === "-") {
+      ev.preventDefault();
+      performSplit(focusedPaneId, "v"); // tree-direction "v" = horizontal divider, stacked
+    } else if (k === "e" || ev.key === "|" || ev.key === "\\") {
+      ev.preventDefault();
+      performSplit(focusedPaneId, "h"); // tree-direction "h" = vertical divider, side by side
+    } else if (k === "w") {
       ev.preventDefault();
       performClose(focusedPaneId);
     }
@@ -241,6 +319,17 @@
     <ContextMenu
       x={ctxMenu.x}
       y={ctxMenu.y}
+      hasSelection={ctxMenu.hasSelection}
+      onCopy={() => {
+        const p = ctxMenu!.paneId;
+        closeContextMenu();
+        void performCopy(p);
+      }}
+      onPaste={() => {
+        const p = ctxMenu!.paneId;
+        closeContextMenu();
+        void performPaste(p);
+      }}
       onSplitHorizontal={() => {
         const p = ctxMenu!.paneId;
         closeContextMenu();
