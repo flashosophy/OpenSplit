@@ -119,6 +119,28 @@ export function setRatio(
   };
 }
 
+/**
+ * Replace the paneId + title of a leaf with new values (used when a process
+ * exits and we respawn a shell in the same slot). The node `id` is preserved
+ * so Svelte can track the DOM element.
+ */
+export function replaceLeafPaneId(
+  root: PaneNode,
+  nodeId: string,
+  newPaneId: string,
+  newTitle: string,
+): PaneNode {
+  if (root.kind === "leaf") {
+    if (root.id !== nodeId) return root;
+    return { ...root, paneId: newPaneId, title: newTitle, profile: null };
+  }
+  return {
+    ...root,
+    a: replaceLeafPaneId(root.a, nodeId, newPaneId, newTitle),
+    b: replaceLeafPaneId(root.b, nodeId, newPaneId, newTitle),
+  };
+}
+
 /** Walk the tree and collect all leaves in left-to-right / top-to-bottom order. */
 export function leaves(root: PaneNode): Leaf[] {
   if (root.kind === "leaf") return [root];

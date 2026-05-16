@@ -110,23 +110,29 @@ pub fn foreground(root_pid: u32) -> Option<ForegroundInfo> {
 /// Given the foreground info of the *source* pane and an optional default
 /// fallback, build a `LaunchSpec` for the new (split) pane.
 ///
-/// If the source isn't ssh, we just return the fallback (caller chooses what
-/// that is, typically the same profile).
-///
-/// If the source IS ssh, we re-emit the same `ssh` command. When ControlMaster
-/// is configured on the user's side, this is instant and skips auth; when not,
-/// it triggers a fresh login. Either way the user lands on the same remote.
+/// - If the source is `ssh`: re-emit the same `ssh` command, landing on the
+///   same remote (ControlMaster reuse when configured, fresh login otherwise).
+/// - Otherwise: return the fallback spec, but **inherit the source pane's
+///   current working directory** so splits open in the same directory you're
+///   already in. This is the #10 quality-of-life fix.
 pub fn build_split_spec(source: &ForegroundInfo, fallback: LaunchSpec) -> LaunchSpec {
-    if !source.is_ssh || source.cmd.is_empty() {
-        return fallback;
+    if source.is_ssh && !source.cmd.is_empty() {
+        let mut cmd = source.cmd.clone();
+        let exe = cmd.remove(0);
+        return LaunchSpec {
+            command: exe,
+            args: cmd,
+            cwd: source.cwd.clone(),
+            env: HashMap::new(),
+            profile: Some("ssh-inherit".to_string()),
+        };
     }
-    let mut cmd = source.cmd.clone();
-    let exe = cmd.remove(0);
+
+    // Non-SSH: inherit cwd from foreground process if we were able to read it.
+    // The spec's own cwd (if explicitly set) takes priority; we only fill in
+    // the gap when it's None.
     LaunchSpec {
-        command: exe,
-        args: cmd,
-        cwd: source.cwd.clone(),
-        env: HashMap::new(),
-        profile: Some("ssh-inherit".to_string()),
+        cwd: fallback.cwd.or_else(|| source.cwd.clone()),
+        ..fallback
     }
 }

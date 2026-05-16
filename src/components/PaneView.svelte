@@ -7,12 +7,13 @@
   interface Props {
     node: PaneNode;
     focusedPaneId: string | null;
+    activePane: Set<string>;
     onFocus: (paneId: string) => void;
     onContextMenu: (ev: MouseEvent, paneId: string) => void;
     onSplitterDrag: (splitId: string, ratio: number) => void;
   }
 
-  let { node, focusedPaneId, onFocus, onContextMenu, onSplitterDrag }: Props =
+  let { node, focusedPaneId, activePane, onFocus, onContextMenu, onSplitterDrag }: Props =
     $props();
 
   let containerEl: HTMLDivElement | undefined = $state();
@@ -28,6 +29,9 @@
   >
     <div class="pane-header">
       <span class="pane-title">{node.title}</span>
+      {#if activePane.has(node.paneId)}
+        <span class="activity-dot" title="New output"></span>
+      {/if}
     </div>
     <div class="pane-body">
       <Terminal paneId={node.paneId} />
@@ -45,6 +49,7 @@
       <PaneView
         node={node.a}
         {focusedPaneId}
+        {activePane}
         {onFocus}
         {onContextMenu}
         {onSplitterDrag}
@@ -59,6 +64,7 @@
       <PaneView
         node={node.b}
         {focusedPaneId}
+        {activePane}
         {onFocus}
         {onContextMenu}
         {onSplitterDrag}
@@ -82,7 +88,9 @@
   }
   .pane-header {
     height: var(--pane-header-h);
-    line-height: var(--pane-header-h);
+    display: flex;
+    align-items: center;
+    gap: 6px;
     padding: 0 8px;
     background: var(--bg);
     color: var(--fg-dim);
@@ -90,9 +98,25 @@
     border-bottom: 1px solid var(--border);
     user-select: none;
     flex-shrink: 0;
+    overflow: hidden;
+  }
+  .pane-title {
+    flex: 1;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .activity-dot {
+    flex-shrink: 0;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
   }
   .leaf.focused .pane-header {
     color: var(--fg);

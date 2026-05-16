@@ -48,6 +48,32 @@ fn err<E: std::fmt::Display>(e: E) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Version
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct VersionInfo {
+    pub semver: &'static str,
+    pub git_hash: &'static str,
+    pub build_date: &'static str,
+    /// Human-friendly display string, e.g. "0.1.0 · 2026-05-15 · abc12345"
+    pub display: String,
+}
+
+#[tauri::command]
+pub fn get_version() -> VersionInfo {
+    let semver = env!("CARGO_PKG_VERSION");
+    let hash = env!("OPENSPLIT_GIT_HASH");
+    let date = env!("OPENSPLIT_BUILD_DATE");
+    VersionInfo {
+        semver,
+        git_hash: hash,
+        build_date: date,
+        display: format!("{semver} · {date} · {hash}"),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Startup
 // ---------------------------------------------------------------------------
 
@@ -116,6 +142,52 @@ pub fn get_startup_action(state: State<'_, Arc<AppState>>) -> StartupAction {
         no_ai_tools: no_ai,
     }
 }
+
+/// Returns a `LaunchSpec` for the system's default shell (the "fallback" that
+/// a pane respawns into after the foreground app exits).
+///
+/// Prefers the user's configured `shell` profile if present; otherwise
+/// synthesizes from the platform default (pwsh → powershell → cmd on Windows;
+/// $SHELL → bash → sh on Unix). The returned spec always sets `cwd` to the
+/// caller-supplied directory so the shell opens in the right place.
+#[tauri::command]
+pub fn get_shell_spec(
+    state: State<'_, Arc<AppState>>,
+    cwd: Option<String>,
+) -> LaunchSpec {
+    let cfg = state.config.read();
+    // Prefer the user's explicit "shell" profile.
+    if let Some(mut spec) = config::profile_to_spec(&cfg, "shell") {
+        spec.cwd = cwd;
+        return spec;
+    }
+    // Fall back to detection (detect_all always returns a "shell" entry).
+    let detected = detect::detect_all(&cfg.profiles);
+    if let Some(tool) = detected.iter().find(|t| t.name == "shell") {
+        let mut spec = config::spec_for_detected(&cfg, "shell", tool.path.as_deref());
+        spec.cwd = cwd;
+        return spec;
+    }
+    // Last resort — should be unreachable in practice.
+    LaunchSpec {
+        command: default_shell_command(),
+        args: default_shell_args(),
+        cwd,
+        env: Default::default(),
+        profile: Some("shell".to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn default_shell_command() -> String { "cmd.exe".into() }
+#[cfg(windows)]
+fn default_shell_args() -> Vec<String> { vec![] }
+#[cfg(not(windows))]
+fn default_shell_command() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+}
+#[cfg(not(windows))]
+fn default_shell_args() -> Vec<String> { vec!["-l".into()] }
 
 // ---------------------------------------------------------------------------
 // Detection + profiles

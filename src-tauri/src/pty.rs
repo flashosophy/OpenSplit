@@ -156,6 +156,18 @@ pub fn spawn(app: &AppHandle, spec: LaunchSpec, cols: u16, rows: u16) -> Result<
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
+
+    // Augment PATH so the child shell sees the same developer tools the user
+    // expects from their interactive shell — even when OpenSplit was launched
+    // via a GUI shortcut that inherited only the narrow system PATH.
+    //
+    // On Windows: npm, cargo, bun, scoop, etc. are typically added only by
+    // the PowerShell profile (or by an installer that set the *user* PATH
+    // entry incorrectly — e.g. writing literal "$env:PATH" as a string).
+    // We rebuild a comprehensive PATH here so every spawned shell already
+    // has those dirs, without requiring the user to fix their registry.
+    cmd.env("PATH", augmented_path());
+
     // Hint to terminal apps that we're a real xterm-256color terminal.
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
@@ -263,6 +275,89 @@ pub fn spawn(app: &AppHandle, spec: LaunchSpec, cols: u16, rows: u16) -> Result<
 pub fn require<'a>(reg: &'a PaneRegistry, pane_id: &str) -> Result<Arc<Pane>> {
     reg.get(pane_id)
         .ok_or_else(|| anyhow!("unknown pane id: {pane_id}"))
+}
+
+// ---------------------------------------------------------------------------
+// Augmented PATH
+// ---------------------------------------------------------------------------
+
+/// Build a PATH string that merges the process's current PATH with the
+/// well-known per-user developer tool directories that GUI-launched processes
+/// commonly miss.
+///
+/// On Windows this also fixes the bug where Node's installer writes the
+/// literal string "$env:PATH" into the user PATH registry entry (so it never
+/// expands), meaning %APPDATA%\npm is invisible to GUI processes.
+///
+/// On Linux/macOS it adds ~/.cargo/bin, ~/.local/bin, etc. that are usually
+/// only on PATH when a shell profile has sourced the relevant init scripts.
+fn augmented_path() -> String {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    // Start with whatever the process already has (filtering out the broken
+    // literal "$env:PATH" entry that Node sometimes writes on Windows).
+    if let Some(existing) = std::env::var_os("PATH") {
+        for d in std::env::split_paths(&existing) {
+            let s = d.to_string_lossy();
+            if s == "$env:PATH" || s == "%PATH%" {
+                continue; // broken registry entry — skip
+            }
+            dirs.push(d);
+        }
+    }
+
+    // Inject well-known dirs that are almost always missing from GUI PATH.
+    #[cfg(windows)]
+    {
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            let npm = std::path::PathBuf::from(&appdata).join("npm");
+            dirs.push(npm);
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+            // pnpm global bin
+            let pnpm = std::path::PathBuf::from(&local).join("pnpm");
+            dirs.push(pnpm);
+        }
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join(".cargo").join("bin"));
+            dirs.push(home.join(".bun").join("bin"));
+            dirs.push(home.join("scoop").join("shims"));
+            dirs.push(home.join(".local").join("bin"));
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = dirs::home_dir() {
+            dirs.push(home.join(".cargo").join("bin"));
+            dirs.push(home.join(".local").join("bin"));
+            dirs.push(home.join("go").join("bin"));
+            dirs.push(home.join(".bun").join("bin"));
+            dirs.push(home.join(".volta").join("bin"));
+            dirs.push(home.join(".nvm").join("versions").join("node")); // rough; nvm is more complex
+        }
+        // Homebrew on Apple Silicon
+        #[cfg(target_arch = "aarch64")]
+        dirs.push(std::path::PathBuf::from("/opt/homebrew/bin"));
+        // Homebrew on Intel
+        #[cfg(target_arch = "x86_64")]
+        dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+
+        dirs.push(std::path::PathBuf::from("/usr/local/bin"));
+        dirs.push(std::path::PathBuf::from("/usr/bin"));
+        dirs.push(std::path::PathBuf::from("/bin"));
+    }
+
+    // De-duplicate, preserving insertion order (original PATH first, so the
+    // user's explicit ordering is respected; the added dirs are fallbacks).
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<std::path::PathBuf> = dirs
+        .into_iter()
+        .filter(|d| seen.insert(d.clone()))
+        .collect();
+
+    let joined = std::env::join_paths(unique).unwrap_or_default();
+    joined.to_string_lossy().to_string()
 }
 
 // ---------------------------------------------------------------------------

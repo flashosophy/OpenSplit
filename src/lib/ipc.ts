@@ -77,6 +77,21 @@ export function getConfig(): Promise<ConfigSnapshot> {
   return invoke("get_config");
 }
 
+export interface VersionInfo {
+  semver: string;
+  git_hash: string;
+  build_date: string;
+  display: string;
+}
+
+export function getVersion(): Promise<VersionInfo> {
+  return invoke("get_version");
+}
+
+export function getShellSpec(cwd: string | null): Promise<LaunchSpec> {
+  return invoke("get_shell_spec", { cwd });
+}
+
 export function setDefaultProfile(name: string | null): Promise<ConfigSnapshot> {
   return invoke("set_default_profile", { args: { name } });
 }

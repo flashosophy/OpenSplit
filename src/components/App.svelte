@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import PaneView from "./PaneView.svelte";
   import ContextMenu from "./ContextMenu.svelte";
   import LauncherPicker from "./LauncherPicker.svelte";
@@ -7,6 +8,7 @@
   import {
     closePane,
     getStartupAction,
+    getShellSpec,
     resolveSplitSpec,
     setDefaultProfile,
     spawnPane,
@@ -16,27 +18,37 @@
     type StartupAction,
   } from "../lib/ipc";
   import { copyText, pasteText } from "../lib/clipboard";
-  import { getTerminal } from "../lib/terminalRegistry";
+  import {
+    createInstance,
+    destroyInstance,
+    focusInstance,
+    getSelection,
+    pasteToInstance,
+    writeToInstance,
+  } from "../lib/terminalInstances";
   import {
     findLeafByPaneId,
     leaves,
     makeLeaf,
     removeLeaf,
+    replaceLeafPaneId,
     setRatio,
     splitLeaf,
     type PaneNode,
     type SplitDirection,
   } from "../lib/PaneTree";
+  import { onPaneData, onPaneExit, resizePane, type PaneDataEvent, type PaneExitEvent } from "../lib/ipc";
+  import type { UnlistenFn } from "@tauri-apps/api/event";
 
   let tree = $state<PaneNode | null>(null);
   let focusedPaneId = $state<string | null>(null);
   let booting = $state(true);
   let bootError = $state<string | null>(null);
 
-  /** When non-null, we're showing the launcher picker instead of a tree. */
-  let pickerTools = $state<DetectedTool[] | null>(null);
+  /** Activity: paneIds that have unseen output (not the focused pane). */
+  let activePane = $state<Set<string>>(new Set());
 
-  /** Settings panel visibility (overlay; works in either picker or tree state). */
+  let pickerTools = $state<DetectedTool[] | null>(null);
   let showSettings = $state(false);
 
   let ctxMenu = $state<{
@@ -46,10 +58,24 @@
     hasSelection: boolean;
   } | null>(null);
 
+  let unlistenData: UnlistenFn | null = null;
+  let unlistenExit: UnlistenFn | null = null;
+
   const INITIAL_COLS = 100;
   const INITIAL_ROWS = 30;
 
+  // ---------------------------------------------------------------------------
+  // Boot
+  // ---------------------------------------------------------------------------
+
   onMount(async () => {
+    // Wire global PTY event listeners before anything is spawned so we never
+    // miss the opening burst of output.
+    [unlistenData, unlistenExit] = await Promise.all([
+      onPaneData(handlePaneData),
+      onPaneExit(handlePaneExit),
+    ]);
+
     try {
       const action: StartupAction = await getStartupAction();
       if (action.kind === "launch") {
@@ -65,55 +91,152 @@
     }
   });
 
-  async function spawnFromSource(source: SpawnSource, title: string) {
-    const result = await spawnPane(source, INITIAL_COLS, INITIAL_ROWS);
-    tree = makeLeaf(result.pane_id, result.spec.profile, title);
+  import { onDestroy } from "svelte";
+  onDestroy(() => {
+    unlistenData?.();
+    unlistenExit?.();
+  });
+
+  // ---------------------------------------------------------------------------
+  // PTY event routing
+  // ---------------------------------------------------------------------------
+
+  function handlePaneData(e: PaneDataEvent) {
+    writeToInstance(e.pane_id, e.chunk);
+    // Mark as active if not the focused pane (activity indicator).
+    if (e.pane_id !== focusedPaneId) {
+      activePane = new Set([...activePane, e.pane_id]);
+    }
+  }
+
+  async function handlePaneExit(e: PaneExitEvent) {
+    if (!tree) return;
+    const exitingLeaf = findLeafByPaneId(tree, e.pane_id);
+    if (!exitingLeaf) return;
+
+    // Write the exit notice into the existing terminal (still visible).
+    writeToInstance(e.pane_id, `\r\n\x1b[2m[process exited with code ${e.code ?? "?"}]\x1b[0m\r\n`);
+
+    // Respawn as the default shell in the SAME pane position. Inherit cwd from
+    // the foreground process if we can detect it; fall back to null (→ $HOME).
+    try {
+      // Ask backend for the cwd of the dying process's foreground descendant.
+      let cwd: string | null = null;
+      try {
+        const { paneForegroundInfo } = await import("../lib/ipc");
+        const fg = await paneForegroundInfo(e.pane_id);
+        cwd = fg?.cwd ?? null;
+      } catch { /* best-effort */ }
+
+      const shellSpec = await getShellSpec(cwd);
+      const spawned = await spawnPane(
+        { kind: "spec", spec: shellSpec },
+        INITIAL_COLS,
+        INITIAL_ROWS,
+      );
+
+      // Create a new xterm instance for the fresh shell pane.
+      await createInstance(spawned.pane_id, (data) => {
+        void import("../lib/ipc").then(({ writePane }) =>
+          writePane(spawned.pane_id, data).catch(() => {}),
+        );
+      });
+      // Re-wire the data/exit listeners are global, so they route automatically.
+
+      // Destroy the old xterm instance (its PTY is already dead).
+      destroyInstance(e.pane_id);
+
+      // Update the tree: same leaf node, new paneId + title.
+      const newTitle = shellSpec.profile ?? shellSpec.command;
+      tree = replaceLeafPaneId(tree!, exitingLeaf.id, spawned.pane_id, newTitle);
+      if (focusedPaneId === e.pane_id) focusedPaneId = spawned.pane_id;
+    } catch (err) {
+      // If respawn fails (e.g. shell not found), leave the dead pane visible
+      // with its exit message so the user can read it and close manually.
+      console.error("[opensplit] respawn failed", err);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Spawn helpers
+  // ---------------------------------------------------------------------------
+
+  async function spawnFromSpec(spec: LaunchSpec) {
+    const result = await spawnPane({ kind: "spec", spec }, INITIAL_COLS, INITIAL_ROWS);
+    const title = spec.profile ?? spec.command;
+
+    // Create the persistent xterm instance and wire keystroke→PTY.
+    await createInstance(result.pane_id, (data) => {
+      void import("../lib/ipc").then(({ writePane }) =>
+        writePane(result.pane_id, data).catch(() => {}),
+      );
+    });
+
+    tree = makeLeaf(result.pane_id, spec.profile, title);
     focusedPaneId = result.pane_id;
   }
 
-  async function spawnFromSpec(spec: LaunchSpec) {
-    const title = spec.profile ?? spec.command;
-    await spawnFromSource({ kind: "spec", spec }, title);
+  async function spawnAndAttachLeaf(source: SpawnSource, title: string): Promise<{ paneId: string }> {
+    const result = await spawnPane(source, INITIAL_COLS, INITIAL_ROWS);
+    await createInstance(result.pane_id, (data) => {
+      void import("../lib/ipc").then(({ writePane }) =>
+        writePane(result.pane_id, data).catch(() => {}),
+      );
+    });
+    return { paneId: result.pane_id };
   }
+
+  // ---------------------------------------------------------------------------
+  // Picker
+  // ---------------------------------------------------------------------------
 
   async function pickFromLauncher(tool: DetectedTool, setAsDefault: boolean) {
     try {
       if (setAsDefault) {
-        try {
-          await setDefaultProfile(tool.name);
-        } catch (e) {
-          console.warn("[opensplit] could not save default", e);
-        }
+        try { await setDefaultProfile(tool.name); } catch {}
       }
       pickerTools = null;
-      await spawnFromSource({ kind: "detected", name: tool.name }, tool.label);
+      const { paneId } = await spawnAndAttachLeaf(
+        { kind: "detected", name: tool.name },
+        tool.label,
+      );
+      tree = makeLeaf(paneId, tool.name, tool.label);
+      focusedPaneId = paneId;
     } catch (e) {
       bootError = `Failed to launch ${tool.label}: ${e}`;
-      console.error("[opensplit] picker launch failed", e);
-      // Re-show picker so the user can pick something else.
       pickerTools = pickerTools ?? [];
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Focus
+  // ---------------------------------------------------------------------------
+
   function focusPane(paneId: string) {
     focusedPaneId = paneId;
+    activePane = new Set([...activePane].filter((id) => id !== paneId));
+    focusInstance(paneId);
   }
+
+  // ---------------------------------------------------------------------------
+  // Context menu
+  // ---------------------------------------------------------------------------
 
   function openContextMenu(ev: MouseEvent, paneId: string) {
     ev.preventDefault();
     ev.stopPropagation();
-    focusedPaneId = paneId;
-    // Capture selection at menu-open time. If the user right-clicks while
-    // text is selected, Copy should be enabled even though clicking the
-    // menu item happens after focus shifts.
-    const t = getTerminal(paneId);
-    const hasSelection = !!t && t.getSelection().length > 0;
+    focusPane(paneId);
+    const hasSelection = getSelection(paneId).length > 0;
     ctxMenu = { x: ev.clientX, y: ev.clientY, paneId, hasSelection };
   }
 
   function closeContextMenu() {
     ctxMenu = null;
   }
+
+  // ---------------------------------------------------------------------------
+  // Split
+  // ---------------------------------------------------------------------------
 
   async function performSplit(sourcePaneId: string, direction: SplitDirection) {
     if (!tree) return;
@@ -122,75 +245,75 @@
 
     try {
       const resolved = await resolveSplitSpec(sourcePaneId, sourceLeaf.profile);
-      const spawned = await spawnPane(
+      const { paneId } = await spawnAndAttachLeaf(
         { kind: "spec", spec: resolved.spec },
-        INITIAL_COLS,
-        INITIAL_ROWS,
+        resolved.inherited_ssh
+          ? `ssh: ${resolved.source_foreground?.cmd.slice(1).join(" ") ?? ""}`
+          : (resolved.spec.profile ?? resolved.spec.command),
       );
-      const title = resolved.inherited_ssh
-        ? `ssh: ${resolved.source_foreground?.cmd.slice(1).join(" ") ?? ""}`
-        : (resolved.spec.profile ?? resolved.spec.command);
-      const newLeaf = makeLeaf(
-        spawned.pane_id,
-        resolved.spec.profile,
-        title,
+
+      const newLeaf = makeLeaf(paneId, resolved.spec.profile,
+        resolved.inherited_ssh
+          ? `ssh: ${resolved.source_foreground?.cmd.slice(1).join(" ") ?? ""}`
+          : (resolved.spec.profile ?? resolved.spec.command),
       );
       tree = splitLeaf(tree, sourceLeaf.id, direction, newLeaf);
-      focusedPaneId = spawned.pane_id;
+      focusedPaneId = paneId;
+      focusInstance(paneId);
     } catch (e) {
       console.error("[opensplit] split failed", e);
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Close
+  // ---------------------------------------------------------------------------
+
   async function performClose(paneId: string) {
     if (!tree) return;
-    try {
-      await closePane(paneId);
-    } catch (e) {
-      console.warn("[opensplit] close_pane error", e);
-    }
+    try { await closePane(paneId); } catch {}
+    destroyInstance(paneId);
+
     const leaf = findLeafByPaneId(tree, paneId);
     if (!leaf) return;
     const next = removeLeaf(tree, leaf.id);
     tree = next;
+
     if (next === null) {
-      // Last pane closed → return to picker instead of closing the window.
-      // This is friendlier when the user opened the app intentionally.
+      // All panes closed — back to picker or relaunch default.
       try {
         const action = await getStartupAction();
         if (action.kind === "picker") {
           pickerTools = action.detected;
         } else {
-          // Default is set; relaunch it.
           await spawnFromSpec(action.spec);
         }
-      } catch (e) {
-        console.error("[opensplit] post-close re-init failed", e);
-        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+      } catch {
         await getCurrentWindow().close();
       }
       return;
     }
     const remaining = leaves(next);
-    focusedPaneId = remaining[0]?.paneId ?? null;
+    const nextId = remaining[0]?.paneId ?? null;
+    focusedPaneId = nextId;
+    if (nextId) focusInstance(nextId);
   }
+
+  // ---------------------------------------------------------------------------
+  // Splitter drag
+  // ---------------------------------------------------------------------------
 
   function onSplitterDrag(splitId: string, ratio: number) {
     if (!tree) return;
     tree = setRatio(tree, splitId, ratio);
   }
 
-  /**
-   * Copy the focused pane's xterm selection to the system clipboard.
-   * Falls back silently when nothing is selected — that's what every terminal
-   * emulator does. The caller decides whether to also send Ctrl+C to the PTY
-   * (no, we explicitly don't, because the user pressed Ctrl+SHIFT+C precisely
-   * to avoid interrupting the running program).
-   */
+  // ---------------------------------------------------------------------------
+  // Copy / Paste
+  // ---------------------------------------------------------------------------
+
   async function performCopy(paneId: string): Promise<boolean> {
-    const t = getTerminal(paneId);
-    if (!t) return false;
-    const sel = t.getSelection();
+    const sel = getSelection(paneId);
     if (!sel) return false;
     try {
       await copyText(sel);
@@ -201,70 +324,49 @@
     }
   }
 
-  /**
-   * Read the system clipboard and stuff it into the focused pane's PTY.
-   * Uses xterm's `paste()` which emits bracketed-paste markers when the
-   * remote app supports them — so multi-line clipboard content won't
-   * auto-execute in a shell that's bracketed-paste-aware.
-   */
   async function performPaste(paneId: string): Promise<boolean> {
-    const t = getTerminal(paneId);
-    if (!t) return false;
     let text: string;
-    try {
-      text = await pasteText();
-    } catch (e) {
-      console.warn("[opensplit] clipboard read failed", e);
-      return false;
-    }
+    try { text = await pasteText(); } catch { return false; }
     if (!text) return false;
-    t.paste(text);
+    pasteToInstance(paneId, text);
     return true;
   }
 
+  // ---------------------------------------------------------------------------
+  // Keyboard
+  // ---------------------------------------------------------------------------
+
   function onKeydown(ev: KeyboardEvent) {
-    // Ctrl+, opens settings (common convention).
     if (ev.ctrlKey && ev.key === ",") {
       ev.preventDefault();
       showSettings = true;
       return;
     }
+    if (ev.ctrlKey && (ev.key === "q" || ev.key === "Q")) {
+      ev.preventDefault();
+      void getCurrentWindow().close();
+      return;
+    }
     if (!focusedPaneId) return;
     const mod = ev.ctrlKey && ev.shiftKey;
     if (!mod) return;
-
-    // Normalize to lowercase since Shift makes ev.key uppercase on letters.
     const k = ev.key.toLowerCase();
 
-    // IMPORTANT: preventDefault + stopPropagation BEFORE awaiting anything,
-    // so xterm's own keydown listener on the focused pane doesn't also see
-    // the keystroke and send it to the PTY as e.g. ^C.
-    //
-    // Shortcut map (Ctrl+Shift+...):
-    //   C            copy selection
-    //   V            paste
-    //   H or -       split with horizontal divider (panes stacked)
-    //   E or |       split with vertical divider   (panes side by side)
-    //   W            close focused pane
-    // Note: Ctrl+Shift+V used to be "split vertical". It now pastes, which is
-    // the universal terminal-emulator convention. Use E (or |) for vertical.
     if (k === "c") {
-      ev.preventDefault();
-      ev.stopPropagation();
+      ev.preventDefault(); ev.stopPropagation();
       void performCopy(focusedPaneId);
     } else if (k === "v") {
-      ev.preventDefault();
-      ev.stopPropagation();
+      ev.preventDefault(); ev.stopPropagation();
       void performPaste(focusedPaneId);
-    } else if (k === "h" || ev.key === "_" || ev.key === "-") {
+    } else if (k === "h" || ev.key === "-") {
       ev.preventDefault();
-      performSplit(focusedPaneId, "v"); // tree-direction "v" = horizontal divider, stacked
+      void performSplit(focusedPaneId, "v");
     } else if (k === "e" || ev.key === "|" || ev.key === "\\") {
       ev.preventDefault();
-      performSplit(focusedPaneId, "h"); // tree-direction "h" = vertical divider, side by side
+      void performSplit(focusedPaneId, "h");
     } else if (k === "w") {
       ev.preventDefault();
-      performClose(focusedPaneId);
+      void performClose(focusedPaneId);
     }
   }
 </script>
@@ -286,13 +388,13 @@
     <PaneView
       node={tree}
       {focusedPaneId}
+      {activePane}
       onFocus={focusPane}
       onContextMenu={openContextMenu}
       onSplitterDrag={onSplitterDrag}
     />
   {/if}
 
-  <!-- Floating gear (top-right). Always visible once boot finishes. -->
   {#if !booting}
     <button
       class="gear"
@@ -304,8 +406,7 @@
       <svg viewBox="0 0 24 24" width="18" height="18">
         <path
           d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm8.4 3.5c0 .5-.1 1-.2 1.5l2.1 1.6-2 3.4-2.5-.9c-.7.6-1.6 1-2.5 1.4l-.4 2.6h-4l-.4-2.6c-.9-.3-1.7-.8-2.5-1.4l-2.5.9-2-3.4 2.1-1.6c-.1-.5-.2-1-.2-1.5s.1-1 .2-1.5L3.5 8.9l2-3.4 2.5.9c.8-.6 1.6-1.1 2.5-1.4L10.9 2h4l.4 2.6c.9.3 1.8.8 2.5 1.4l2.5-.9 2 3.4-2.1 1.6c.1.5.2 1 .2 1.5z"
-          fill="none" stroke="currentColor" stroke-width="1.3"
-          stroke-linejoin="round"
+          fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"
         />
       </svg>
     </button>
@@ -320,90 +421,20 @@
       x={ctxMenu.x}
       y={ctxMenu.y}
       hasSelection={ctxMenu.hasSelection}
-      onCopy={() => {
-        const p = ctxMenu!.paneId;
-        closeContextMenu();
-        void performCopy(p);
-      }}
-      onPaste={() => {
-        const p = ctxMenu!.paneId;
-        closeContextMenu();
-        void performPaste(p);
-      }}
-      onSplitHorizontal={() => {
-        const p = ctxMenu!.paneId;
-        closeContextMenu();
-        performSplit(p, "v");
-      }}
-      onSplitVertical={() => {
-        const p = ctxMenu!.paneId;
-        closeContextMenu();
-        performSplit(p, "h");
-      }}
-      onClose={() => {
-        const p = ctxMenu!.paneId;
-        closeContextMenu();
-        performClose(p);
-      }}
+      onCopy={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performCopy(p); }}
+      onPaste={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performPaste(p); }}
+      onSplitHorizontal={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performSplit(p, "v"); }}
+      onSplitVertical={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performSplit(p, "h"); }}
+      onClose={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performClose(p); }}
     />
   {/if}
 </main>
 
 <style>
-  .root {
-    position: fixed;
-    inset: 0;
-    background: var(--bg);
-    display: flex;
-    flex-direction: column;
-  }
-  .boot {
-    flex: 1;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--fg-dim);
-    font-size: 14px;
-  }
-  .boot.error {
-    flex-direction: column;
-    color: var(--danger);
-    padding: 24px;
-    text-align: left;
-    align-items: flex-start;
-    gap: 12px;
-  }
-  .boot.error pre {
-    background: var(--bg-elev);
-    padding: 12px;
-    border-radius: 4px;
-    color: var(--fg);
-    max-width: 100%;
-    overflow: auto;
-    white-space: pre-wrap;
-  }
-
-  .gear {
-    position: fixed;
-    top: 8px;
-    right: 8px;
-    z-index: 700;
-    width: 30px;
-    height: 30px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(22, 22, 26, 0.7);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    color: var(--fg-dim);
-    cursor: pointer;
-    padding: 0;
-    backdrop-filter: blur(4px);
-  }
-  .gear:hover {
-    color: var(--fg);
-    border-color: var(--border-active);
-    background: var(--bg-elev);
-  }
+  .root { position: fixed; inset: 0; background: var(--bg); display: flex; flex-direction: column; }
+  .boot { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--fg-dim); font-size: 14px; }
+  .boot.error { flex-direction: column; color: var(--danger); padding: 24px; align-items: flex-start; gap: 12px; }
+  .boot.error pre { background: var(--bg-elev); padding: 12px; border-radius: 4px; color: var(--fg); max-width: 100%; overflow: auto; white-space: pre-wrap; }
+  .gear { position: fixed; top: 8px; right: 8px; z-index: 700; width: 30px; height: 30px; display: flex; align-items: center; justify-content: center; background: rgba(22,22,26,0.7); border: 1px solid var(--border); border-radius: 6px; color: var(--fg-dim); cursor: pointer; padding: 0; backdrop-filter: blur(4px); }
+  .gear:hover { color: var(--fg); border-color: var(--border-active); background: var(--bg-elev); }
 </style>

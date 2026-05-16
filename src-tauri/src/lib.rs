@@ -79,7 +79,9 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            ipc::get_version,
             ipc::get_startup_action,
+            ipc::get_shell_spec,
             ipc::detect_tools,
             ipc::list_profiles,
             ipc::get_config,

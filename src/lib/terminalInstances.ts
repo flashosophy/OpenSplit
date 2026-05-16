@@ -1,0 +1,237 @@
+/**
+ * Persistent xterm.js instances keyed by paneId.
+ *
+ * The fundamental problem we're solving: Svelte's recursive PaneView tree
+ * mounts/unmounts Terminal components whenever the tree shape changes (e.g.
+ * on a split a leaf is replaced by a Split node, destroying the old component
+ * and creating a new one for the same paneId). The PTY on the backend survives
+ * but the local xterm scrollback, cursor position, and rendered history are
+ * gone.
+ *
+ * Fix: Terminal components don't OWN an xterm instance — they BORROW one from
+ * this registry. The xterm instance is created once per paneId and lives until
+ * the pane is explicitly closed. Components attach/detach by appending/removing
+ * the xterm DOM element from their host div.
+ *
+ * Lazy-load bonus: we import xterm only when the first terminal actually needs
+ * to mount, so the picker screen (which doesn't need a terminal at all) loads
+ * ~0 KB of xterm until necessary.
+ */
+
+import type { Terminal } from "@xterm/xterm";
+import type { FitAddon } from "@xterm/addon-fit";
+
+export interface TerminalInstance {
+  term: Terminal;
+  fitAddon: FitAddon;
+  /** The root element produced by term.open(); we move this between host divs. */
+  element: HTMLElement;
+  paneId: string;
+  /** Unprocessed output that arrived before the first host attached. */
+  earlyChunks: string[];
+  /** Whether this instance has been opened into a DOM element yet. */
+  opened: boolean;
+}
+
+const instances = new Map<string, TerminalInstance>();
+
+const XTERM_THEME = {
+  background: "#0e0e10",
+  foreground: "#e6e6e8",
+  cursor: "#e6e6e8",
+  cursorAccent: "#0e0e10",
+  selectionBackground: "#4a90e2aa",
+  black: "#16161a",
+  red: "#e25c5c",
+  green: "#7bc47f",
+  yellow: "#e2c25c",
+  blue: "#4a90e2",
+  magenta: "#c25ce2",
+  cyan: "#5ce2c2",
+  white: "#e6e6e8",
+  brightBlack: "#5a5a65",
+  brightRed: "#ff7b7b",
+  brightGreen: "#9be4a0",
+  brightYellow: "#ffd97b",
+  brightBlue: "#6ea9ee",
+  brightMagenta: "#d77bee",
+  brightCyan: "#7beedb",
+  brightWhite: "#ffffff",
+};
+
+/**
+ * Create a new persistent xterm instance for a pane. Call once per paneId
+ * (typically right after spawn_pane succeeds). The instance is NOT yet opened
+ * into the DOM — that happens in `attach()`.
+ *
+ * We lazy-import xterm here so this only runs when a pane is actually spawned,
+ * not during the picker screen.
+ */
+export async function createInstance(
+  paneId: string,
+  onData: (data: string) => void,
+): Promise<TerminalInstance> {
+  // Lazy imports — only load xterm when we actually need it.
+  const [{ Terminal }, { FitAddon }, { WebLinksAddon }] = await Promise.all([
+    import("@xterm/xterm"),
+    import("@xterm/addon-fit"),
+    import("@xterm/addon-web-links"),
+  ]);
+  // CSS is side-effect only; import once.
+  await import("@xterm/xterm/css/xterm.css");
+
+  const term = new Terminal({
+    fontFamily:
+      "'Cascadia Code', 'JetBrains Mono', 'Fira Code', Menlo, Consolas, 'Liberation Mono', monospace",
+    fontSize: 13,
+    lineHeight: 1.15,
+    cursorBlink: true,
+    cursorStyle: "block",
+    allowTransparency: false,
+    scrollback: 5000,
+    theme: XTERM_THEME,
+  });
+
+  const fitAddon = new FitAddon();
+  term.loadAddon(fitAddon);
+  term.loadAddon(new WebLinksAddon());
+  term.onData(onData);
+
+  // We don't call term.open() yet because we need a real host element.
+  const inst: TerminalInstance = {
+    term,
+    fitAddon,
+    element: null as unknown as HTMLElement, // set in attach()
+    paneId,
+    earlyChunks: [],
+    opened: false,
+  };
+
+  instances.set(paneId, inst);
+  return inst;
+}
+
+/**
+ * Attach (or re-attach) a persistent instance to a new host element.
+ *
+ * On first call: term.open(host) creates the xterm canvas inside `host`.
+ * On subsequent calls (re-attach after split/re-render): we simply move
+ * the xterm root element into the new host, then re-fit. No new canvas,
+ * no lost scrollback.
+ */
+export function attach(paneId: string, host: HTMLElement): void {
+  const inst = instances.get(paneId);
+  if (!inst) return;
+
+  if (!inst.opened) {
+    inst.term.open(host);
+    inst.element = host.firstElementChild as HTMLElement ?? host;
+    inst.opened = true;
+    // Flush early chunks.
+    for (const chunk of inst.earlyChunks) inst.term.write(chunk);
+    inst.earlyChunks.length = 0;
+  } else {
+    // Move the existing xterm DOM subtree into the new host.
+    // xterm renders into a div it appends to the element you pass to open().
+    // That div is still alive — just reparent it.
+    while (host.firstChild) host.removeChild(host.firstChild);
+    // xterm's container is the first child of the original host.
+    const xtermContainer = inst.term.element;
+    if (xtermContainer && xtermContainer.parentElement !== host) {
+      host.appendChild(xtermContainer);
+    }
+  }
+
+  // Fit after attach so the terminal knows its new size immediately.
+  try {
+    inst.fitAddon.fit();
+  } catch {
+    /* host may not have layout yet; ResizeObserver will catch it */
+  }
+}
+
+/**
+ * Detach: the host element is going away (component destroy) but the instance
+ * survives. We don't touch the xterm DOM — the element lives in `inst.element`
+ * and will be re-attached to the next host.
+ */
+export function detach(_paneId: string): void {
+  // Nothing to do right now — instance stays alive in the map.
+  // If we needed to, we could reparent the element to a hidden off-screen
+  // div here to prevent layout thrash, but in practice Svelte destroys+creates
+  // fast enough that it's not necessary.
+}
+
+/** Write output to the instance (from pane:data events). */
+export function writeToInstance(paneId: string, chunk: string): void {
+  const inst = instances.get(paneId);
+  if (!inst) return;
+  if (!inst.opened) {
+    inst.earlyChunks.push(chunk);
+  } else {
+    try {
+      inst.term.write(chunk);
+    } catch {
+      /* instance may be mid-destroy; ignore */
+    }
+  }
+}
+
+/** Get xterm selection text. */
+export function getSelection(paneId: string): string {
+  return instances.get(paneId)?.term.getSelection() ?? "";
+}
+
+/** Paste text via bracketed paste. */
+export function pasteToInstance(paneId: string, text: string): void {
+  const inst = instances.get(paneId);
+  if (!inst || !inst.opened) return;
+  try {
+    inst.term.paste(text);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Focus the terminal. */
+export function focusInstance(paneId: string): void {
+  const inst = instances.get(paneId);
+  if (inst?.opened) {
+    try { inst.term.focus(); } catch { /* ignore */ }
+  }
+}
+
+/** Resize the terminal's virtual viewport. */
+export function fitInstance(paneId: string): boolean {
+  const inst = instances.get(paneId);
+  if (!inst || !inst.opened) return false;
+  try {
+    inst.fitAddon.fit();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Get the current cols/rows of the terminal. */
+export function getDimensions(paneId: string): { cols: number; rows: number } | null {
+  const inst = instances.get(paneId);
+  if (!inst) return null;
+  return { cols: inst.term.cols, rows: inst.term.rows };
+}
+
+/** Fully destroy an instance (call when pane is closed, not just unmounted). */
+export function destroyInstance(paneId: string): void {
+  const inst = instances.get(paneId);
+  if (!inst) return;
+  instances.delete(paneId);
+  try {
+    inst.term.dispose();
+  } catch {
+    /* ignore */
+  }
+}
+
+export function hasInstance(paneId: string): boolean {
+  return instances.has(paneId);
+}

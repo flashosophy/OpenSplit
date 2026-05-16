@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
-  import type { ConfigSnapshot, DetectedTool } from "../lib/ipc";
+  import type { ConfigSnapshot, DetectedTool, VersionInfo } from "../lib/ipc";
   import {
     detectTools,
     getConfig,
+    getVersion,
     setDefaultProfile,
     setSshInherit,
   } from "../lib/ipc";
@@ -16,6 +17,7 @@
 
   let config = $state<ConfigSnapshot | null>(null);
   let tools = $state<DetectedTool[]>([]);
+  let version = $state<VersionInfo | null>(null);
   let loading = $state(true);
   let refreshing = $state(false);
   let error = $state<string | null>(null);
@@ -24,9 +26,10 @@
     loading = true;
     error = null;
     try {
-      const [c, t] = await Promise.all([getConfig(), detectTools()]);
+      const [c, t, v] = await Promise.all([getConfig(), detectTools(), getVersion()]);
       config = c;
       tools = t;
+      version = v;
     } catch (e) {
       error = String(e);
     } finally {
@@ -178,6 +181,12 @@
           <code class="filepath">{config.config_path ?? "(unknown)"}</code>
         </p>
       </section>
+
+      {#if version}
+        <section class="section version-section">
+          <span class="version-str">OpenSplit {version.display}</span>
+        </section>
+      {/if}
     {/if}
   </div>
 </div>
@@ -359,5 +368,16 @@
   }
   .state.error {
     color: var(--danger);
+  }
+  .version-section {
+    display: flex;
+    justify-content: flex-end;
+    padding: 10px 18px;
+  }
+  .version-str {
+    font-size: 11px;
+    color: var(--fg-dim);
+    font-family: 'Cascadia Code', monospace;
+    opacity: 0.7;
   }
 </style>
