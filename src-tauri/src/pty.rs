@@ -272,7 +272,7 @@ pub fn spawn(app: &AppHandle, spec: LaunchSpec, cols: u16, rows: u16) -> Result<
 
 /// Convenience for callers that already have a `pane_id` and want to look up
 /// or surface a typed error.
-pub fn require<'a>(reg: &'a PaneRegistry, pane_id: &str) -> Result<Arc<Pane>> {
+pub fn require(reg: &PaneRegistry, pane_id: &str) -> Result<Arc<Pane>> {
     reg.get(pane_id)
         .ok_or_else(|| anyhow!("unknown pane id: {pane_id}"))
 }
@@ -396,11 +396,11 @@ fn resolve_program(program: &str, args: &[String]) -> Result<(String, Vec<String
         if let Some(found) = which_windows(program) {
             return Ok(wrap_if_batch(found, args));
         }
-        return Err(anyhow!(
+        Err(anyhow!(
             "could not find `{program}` on PATH (searched with PATHEXT). \
              Tip: ensure the directory containing it is on your system PATH, \
              not just your PowerShell profile — GUI apps don't see profile-added PATH entries."
-        ));
+        ))
     }
 
     #[cfg(not(windows))]

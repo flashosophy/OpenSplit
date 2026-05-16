@@ -77,15 +77,17 @@ $releaseDir = "src-tauri\target\release"
 $exeSrc     = "$releaseDir\opensplit.exe"
 $distDir    = "dist"
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+$version = & "$cargobin\cargo.exe" metadata --manifest-path "src-tauri\Cargo.toml" --no-deps --format-version 1 2>$null |
+    ConvertFrom-Json | Select-Object -ExpandProperty packages |
+    Where-Object { $_.name -eq "opensplit" } |
+    Select-Object -First 1 -ExpandProperty version
+if (-not $version) { throw "Could not determine OpenSplit version from src-tauri\Cargo.toml" }
+
+Remove-Item "$distDir\opensplit-*-windows-x64.exe" -Force -ErrorAction SilentlyContinue
+Remove-Item "$distDir\opensplit-*-windows-x64.exe.sha256" -Force -ErrorAction SilentlyContinue
 
 if (Test-Path $exeSrc) {
     $hash = (Get-FileHash $exeSrc -Algorithm SHA256).Hash.ToLower()
-    $version = & "$cargobin\cargo.exe" metadata --no-deps --format-version 1 2>$null |
-        ConvertFrom-Json | Select-Object -ExpandProperty packages |
-        Where-Object { $_.name -eq "opensplit" } |
-        Select-Object -ExpandProperty version
-    if (-not $version) { $version = "0.1.0" }
-
     $destExe  = "$distDir\opensplit-$version-windows-x64.exe"
     $destHash = "$distDir\opensplit-$version-windows-x64.exe.sha256"
 
@@ -102,7 +104,12 @@ if (Test-Path $exeSrc) {
 }
 
 # List bundle outputs
-$bundleItems = Get-ChildItem "$releaseDir\bundle" -Recurse -Include "*.exe","*.msi" -ErrorAction SilentlyContinue
+Get-ChildItem "$releaseDir\bundle" -Recurse -Include "*.exe","*.msi" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -notlike "*$version*" } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
+$bundleItems = Get-ChildItem "$releaseDir\bundle" -Recurse -Include "*.exe","*.msi" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like "*$version*" }
 if ($bundleItems) {
     Write-Host ""
     Write-Host "Installer bundles:" -ForegroundColor Cyan
