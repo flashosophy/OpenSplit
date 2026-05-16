@@ -20,6 +20,7 @@
 
 import type { Terminal } from "@xterm/xterm";
 import type { FitAddon } from "@xterm/addon-fit";
+import { copyText } from "./clipboard";
 
 export interface TerminalInstance {
   term: Terminal;
@@ -59,6 +60,48 @@ const XTERM_THEME = {
   brightWhite: "#ffffff",
 };
 
+const OSC52_CLIPBOARD_TARGETS = new Set(["c", "p", "s", "0", "1", "2", "3", "4", "5", "6", "7"]);
+const OSC52_MAX_DECODED_BYTES = 4 * 1024 * 1024;
+
+function decodeOsc52Payload(data: string): string | null {
+  const semicolon = data.indexOf(";");
+  if (semicolon === -1) return null;
+
+  const target = data.slice(0, semicolon);
+  const encoded = data.slice(semicolon + 1);
+  if (!OSC52_CLIPBOARD_TARGETS.has(target) || !encoded || encoded === "?") {
+    return null;
+  }
+
+  const normalized = encoded.replace(/\s/g, "");
+  const decodedLength = Math.floor((normalized.length * 3) / 4);
+  if (decodedLength > OSC52_MAX_DECODED_BYTES) {
+    console.warn("[opensplit] ignored oversized OSC 52 clipboard payload");
+    return null;
+  }
+
+  try {
+    const binary = atob(normalized);
+    const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch (e) {
+    console.warn("[opensplit] failed to decode OSC 52 clipboard payload", e);
+    return null;
+  }
+}
+
+function installOsc52ClipboardHandler(term: Terminal): void {
+  term.parser.registerOscHandler(52, (data) => {
+    const text = decodeOsc52Payload(data);
+    if (text === null) return true;
+
+    void copyText(text).catch((e) => {
+      console.warn("[opensplit] failed to write OSC 52 clipboard payload", e);
+    });
+    return true;
+  });
+}
+
 /**
  * Create a new persistent xterm instance for a pane. Call once per paneId
  * (typically right after spawn_pane succeeds). The instance is NOT yet opened
@@ -95,6 +138,7 @@ export async function createInstance(
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new WebLinksAddon());
+  installOsc52ClipboardHandler(term);
   term.onData(onData);
 
   // We don't call term.open() yet because we need a real host element.
