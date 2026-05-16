@@ -72,6 +72,15 @@
   let unlistenData: UnlistenFn | null = null;
   let unlistenExit: UnlistenFn | null = null;
 
+  /**
+   * PaneIds currently being switched via performSwitch. handlePaneExit checks
+   * this set and skips the shell-respawn for panes being deliberately replaced.
+   * Without this, closePane() in performSwitch triggers pane:exit, which fires
+   * handlePaneExit, which spawns a shell — racing with and overwriting the tool
+   * that performSwitch is about to launch.
+   */
+  const switchingPanes = new Set<string>();
+
   const INITIAL_COLS = 100;
   const INITIAL_ROWS = 30;
 
@@ -128,6 +137,11 @@
     if (!tree) return;
     const exitingLeaf = findLeafByPaneId(tree, e.pane_id);
     if (!exitingLeaf) return;
+    // performSwitch deliberately closed this pane — don't respawn a shell.
+    if (switchingPanes.has(e.pane_id)) {
+      switchingPanes.delete(e.pane_id);
+      return;
+    }
 
     // Write the exit notice into the existing terminal (still visible).
     writeToInstance(e.pane_id, `\r\n\x1b[2m[process exited with code ${e.code ?? "?"}]\x1b[0m\r\n`);
@@ -311,8 +325,10 @@
       cwd = fg?.cwd ?? null;
     } catch { /* best-effort */ }
 
-    // Kill the running PTY and destroy its xterm instance.
-    try { await closePane(paneId); } catch {}
+    // Mark as switching BEFORE closePane so handlePaneExit ignores the
+    // pane:exit event that closePane triggers.
+    switchingPanes.add(paneId);
+    try { await closePane(paneId); } catch { switchingPanes.delete(paneId); }
     destroyInstance(paneId);
 
     try {
