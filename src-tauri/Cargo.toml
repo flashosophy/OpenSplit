@@ -1,6 +1,6 @@
 [package]
 name = "opensplit"
-version = "2026.5.15"
+version = "26.5.15"
 description = "A fast cross-platform terminal harness with right-click splits and SSH session inheritance."
 authors = ["OpenSplit contributors"]
 edition = "2021"
@@ -55,7 +55,7 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [profile.release]
 opt-level = 3
-lto = true
-codegen-units = 1
+lto = "thin"       # parallel LTO — uses all cores, ~2x faster than lto=true
+codegen-units = 16 # parallel codegen — use all cores during compile
 panic = "abort"
 strip = true
