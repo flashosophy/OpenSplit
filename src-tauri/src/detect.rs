@@ -70,6 +70,13 @@ const CATALOG: &[Candidate] = &[
         binaries: &["cursor-agent"],
     },
     Candidate {
+        name: "kimi",
+        label: "Kimi Code",
+        description: "Moonshot AI coding agent (Kimi K2)",
+        icon: "ai",
+        binaries: &["kimi"],
+    },
+    Candidate {
         name: "sgpt",
         label: "ShellGPT",
         description: "ChatGPT in your shell",

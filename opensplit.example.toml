@@ -30,6 +30,9 @@ command = "codex"
 [profiles.claude]
 command = "claude"
 
+[profiles.kimi]
+command = "kimi"
+
 [profiles.aider]
 command = "aider"
 
