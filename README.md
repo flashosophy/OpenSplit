@@ -4,6 +4,16 @@ OpenSplit is a fast, cross-platform terminal harness for AI coding agents and de
 
 Built with Rust + Tauri 2 + Svelte 5 + xterm.js. Ships as a single native binary on Windows, with Linux and macOS builds possible from source.
 
+## Screenshots
+
+![Launcher picker — auto-detects installed AI tools on first launch](sc.webp)
+
+*Launcher picker: OpenSplit detects installed AI tools (opencode, Codex, Claude Code, Gemini CLI, Kimi Code, and your system shell) and presents them as a keyboard-navigable grid. Press 1–6 to quick-pick, or check "Remember this as my default" to skip the picker next time.*
+
+![Three-pane split — opencode, Codex, and Kimi Code running side by side](sc2.webp)
+
+*Three-pane layout: opencode on the left, Codex CLI top-right, Kimi Code CLI bottom-right. Right-click any pane to split again, switch to a different tool, copy/paste, or close.*
+
 ## Download
 
 Windows builds are available on the [Releases page](https://github.com/flashosophy/OpenSplit/releases).
