@@ -179,11 +179,11 @@ npm run tauri -- dev
 Produces:
 
 ```
-dist\opensplit-26.5.15-windows-x64.exe         # portable single-file exe
-dist\opensplit-26.5.15-windows-x64.exe.sha256  # SHA256 checksum
+dist\opensplit-26.5.16-windows-x64.exe         # portable single-file exe
+dist\opensplit-26.5.16-windows-x64.exe.sha256  # SHA256 checksum
 
-src-tauri\target\release\bundle\nsis\OpenSplit_26.5.15_x64-setup.exe
-src-tauri\target\release\bundle\msi\OpenSplit_26.5.15_x64_en-US.msi
+src-tauri\target\release\bundle\nsis\OpenSplit_26.5.16_x64-setup.exe
+src-tauri\target\release\bundle\msi\OpenSplit_26.5.16_x64_en-US.msi
 ```
 
 ### Manual build (any platform)
