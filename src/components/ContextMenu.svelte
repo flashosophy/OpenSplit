@@ -11,6 +11,8 @@
     hasSelection: boolean;
     /** Profile/name of the tool currently running in this pane, if known. */
     currentProfile: string | null;
+    /** True when the source pane's foreground process is an ssh client. */
+    currentIsSsh: boolean;
     /** Available tools to switch to (from cached detection). */
     availableTools: DetectedTool[];
     onCopy: () => void;
@@ -26,6 +28,7 @@
     x, y,
     hasSelection,
     currentProfile,
+    currentIsSsh,
     availableTools,
     onCopy, onPaste,
     onSplitHorizontal, onSplitVertical,
@@ -107,7 +110,7 @@
         <line x1="1.5" y1="8" x2="14.5" y2="8" stroke="currentColor" stroke-width="1.2"/>
       </svg>
     </span>
-    <span class="label">Split Horizontal</span>
+    <span class="label">{currentIsSsh ? "Dup SSH Horizontal" : "Split Horizontal"}</span>
     <span class="shortcut">Ctrl+Shift+H</span>
   </button>
 
@@ -118,7 +121,7 @@
         <line x1="8" y1="1.5" x2="8" y2="14.5" stroke="currentColor" stroke-width="1.2"/>
       </svg>
     </span>
-    <span class="label">Split Vertical</span>
+    <span class="label">{currentIsSsh ? "Dup SSH Vertical" : "Split Vertical"}</span>
     <span class="shortcut">Ctrl+Shift+E</span>
   </button>
 

@@ -65,6 +65,7 @@
     paneId: string;
     hasSelection: boolean;
     currentProfile: string | null;
+    currentIsSsh: boolean;
   } | null>(null);
 
   /** Cached tool list for the Switch submenu — loaded once at boot. */
@@ -272,7 +273,15 @@
       paneId,
       hasSelection,
       currentProfile: leaf?.profile ?? null,
+      currentIsSsh: false,
     };
+
+    void paneForegroundInfo(paneId)
+      .then((info) => {
+        if (!ctxMenu || ctxMenu.paneId !== paneId) return;
+        ctxMenu = { ...ctxMenu, currentIsSsh: info?.is_ssh ?? false };
+      })
+      .catch(() => {});
   }
 
   function closeContextMenu() {
@@ -528,6 +537,7 @@
       y={ctxMenu.y}
       hasSelection={ctxMenu.hasSelection}
       currentProfile={ctxMenu.currentProfile}
+      currentIsSsh={ctxMenu.currentIsSsh}
       {availableTools}
       onCopy={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performCopy(p); }}
       onPaste={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performPaste(p); }}
