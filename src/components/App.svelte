@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
   import PaneView from "./PaneView.svelte";
   import ContextMenu from "./ContextMenu.svelte";
   import LauncherPicker from "./LauncherPicker.svelte";
@@ -45,6 +45,7 @@
     type PaneNode,
     type SplitDirection,
   } from "../lib/PaneTree";
+  import type { WindowSizePreset } from "../lib/sizePresets";
   import type { UnlistenFn } from "@tauri-apps/api/event";
 
   let tree = $state<PaneNode | null>(null);
@@ -355,6 +356,22 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Window size presets
+  // ---------------------------------------------------------------------------
+
+  async function performSetWindowSize(preset: WindowSizePreset) {
+    try {
+      const win = getCurrentWindow();
+      if (await win.isMaximized()) {
+        await win.unmaximize();
+      }
+      await win.setSize(new LogicalSize(preset.width, preset.height));
+    } catch (e) {
+      console.error("[opensplit] set window size failed", e);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Close
   // ---------------------------------------------------------------------------
 
@@ -517,6 +534,7 @@
       onSplitHorizontal={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performSplit(p, "v"); }}
       onSplitVertical={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performSplit(p, "h"); }}
       onSwitchTo={(tool) => { const p = ctxMenu!.paneId; closeContextMenu(); void performSwitch(p, tool); }}
+      onSetSize={(preset) => { closeContextMenu(); void performSetWindowSize(preset); }}
       onClose={() => { const p = ctxMenu!.paneId; closeContextMenu(); void performClose(p); }}
     />
   {/if}

@@ -1,5 +1,9 @@
 <script lang="ts">
   import type { DetectedTool } from "../lib/ipc";
+  import {
+    WINDOW_SIZE_PRESETS,
+    type WindowSizePreset,
+  } from "../lib/sizePresets";
 
   interface Props {
     x: number;
@@ -14,6 +18,7 @@
     onSplitHorizontal: () => void;
     onSplitVertical: () => void;
     onSwitchTo: (tool: DetectedTool) => void;
+    onSetSize: (preset: WindowSizePreset) => void;
     onClose: () => void;
   }
 
@@ -25,14 +30,28 @@
     onCopy, onPaste,
     onSplitHorizontal, onSplitVertical,
     onSwitchTo,
+    onSetSize,
     onClose,
   }: Props = $props();
 
   let switchOpen = $state(false);
+  let sizeOpen = $state(false);
 
   /** Tools that can be switched to: all launchable ones. */
   let switchTargets = $derived(
     availableTools.filter((t) => t.name === "shell" || t.path !== null)
+  );
+
+  let sizeGroups = $derived(
+    WINDOW_SIZE_PRESETS.reduce((groups, preset) => {
+      const existing = groups.find((group) => group.name === preset.group);
+      if (existing) {
+        existing.presets.push(preset);
+      } else {
+        groups.push({ name: preset.group, presets: [preset] });
+      }
+      return groups;
+    }, [] as { name: WindowSizePreset["group"]; presets: WindowSizePreset[] }[])
   );
 
   /**
@@ -168,6 +187,52 @@
     <div class="sep"></div>
   {/if}
 
+  <!-- Size → submenu -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class="submenu-wrap"
+    onmouseenter={() => (sizeOpen = true)}
+    onmouseleave={() => (sizeOpen = false)}
+  >
+    <div class="item submenu-trigger" class:open={sizeOpen}>
+      <span class="icon" aria-hidden="true">
+        <svg viewBox="0 0 16 16" width="16" height="16">
+          <rect x="2.5" y="3" width="11" height="10" rx="1.4"
+            fill="none" stroke="currentColor" stroke-width="1.2"/>
+          <path d="M5 6h6M5 10h6" fill="none" stroke="currentColor"
+            stroke-width="1.2" stroke-linecap="round"/>
+        </svg>
+      </span>
+      <span class="label">Size</span>
+      <span class="arrow">›</span>
+    </div>
+
+    {#if sizeOpen}
+      <div class="submenu size-submenu">
+        {#each sizeGroups as group (group.name)}
+          <div class="submenu-heading">{group.name}</div>
+          {#each group.presets as preset (preset.id)}
+            <button
+              type="button"
+              class="item"
+              onclick={(e) => { e.stopPropagation(); onSetSize(preset); }}
+            >
+              <span class="icon" aria-hidden="true">
+                <svg viewBox="0 0 16 16" width="16" height="16">
+                  <rect x="3" y="3" width="10" height="10" rx="1.4"
+                    fill="none" stroke="currentColor" stroke-width="1.1"/>
+                </svg>
+              </span>
+              <span class="label">{preset.label}</span>
+            </button>
+          {/each}
+        {/each}
+      </div>
+    {/if}
+  </div>
+
+  <div class="sep"></div>
+
   <!-- Close -->
   <button class="item danger" onclick={onClose} type="button">
     <span class="icon" aria-hidden="true">
@@ -248,5 +313,15 @@
     padding: 4px;
     min-width: 180px;
     z-index: 1001;
+  }
+  .size-submenu {
+    min-width: 220px;
+  }
+  .submenu-heading {
+    padding: 6px 10px 3px 38px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
   }
 </style>

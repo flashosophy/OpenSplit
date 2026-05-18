@@ -58,6 +58,14 @@ right-click a pane →
       codex
       kimi-cli
       Shell
+  Size ▶
+      Square 1024 x 1024
+      720p 1280 x 720
+      1080p 1920 x 1080
+      1440p 2560 x 1440
+      720p 720 x 1280
+      1080p 1080 x 1920
+      1440p 1440 x 2560
   ────────────────────────────────────
   Close Pane              Ctrl+Shift+W
 ```
@@ -65,6 +73,8 @@ right-click a pane →
 Split as many times as you like. Each split produces two independent PTY sessions.
 
 **Switch tools without losing layout.** Right-click → Switch to → pick any detected tool. The current pane's process is closed and the new tool opens in its place in the same position, inheriting the working directory where possible.
+
+**Set capture-friendly window sizes.** Right-click → Size → pick Square 1024x1024, horizontal 16:9 presets (720p, 1080p, 1440p), or vertical 9:16 presets (720p, 1080p, 1440p). The terminal panes refit after the window resize.
 
 **Shell fallback on exit.** When a tool finishes (e.g. you Ctrl+C out of opencode), the pane respawns as your default shell instead of going blank or closing. From the shell you can run `opencode`, `codex`, or anything else. Close the pane when you are done.
 
