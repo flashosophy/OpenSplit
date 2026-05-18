@@ -52,6 +52,9 @@ right-click a pane →
   ────────────────────────────────────
   Split Horizontal        Ctrl+Shift+H
   Split Vertical          Ctrl+Shift+E
+  # If this pane is running ssh, these show as:
+  Dup SSH Horizontal      Ctrl+Shift+H
+  Dup SSH Vertical        Ctrl+Shift+E
   ────────────────────────────────────
   Switch to ▶
     ● opencode            (current, bullet)
@@ -78,15 +81,24 @@ Split as many times as you like. Each split produces two independent PTY session
 
 **Shell fallback on exit.** When a tool finishes (e.g. you Ctrl+C out of opencode), the pane respawns as your default shell instead of going blank or closing. From the shell you can run `opencode`, `codex`, or anything else. Close the pane when you are done.
 
-**SSH session inheritance.** Splitting a pane whose foreground process is `ssh` re-runs the same `ssh` command in the new pane. With [OpenSSH ControlMaster](https://developer.mozilla.org/en-US/docs/Mozilla/Projects/NSS/Reference/NSS_reference/ssher#ControlMaster) configured, the new pane connects instantly without re-authentication. Without it, a normal SSH login runs.
+**SSH duplicate panes.** When the pane is running `ssh`, the split menu changes to `Dup SSH Horizontal` and `Dup SSH Vertical`. OpenSplit does not copy your password, store your password, or clone the remote shell. It simply runs the same local SSH command again in the new pane.
 
 ```
-# Add to ~/.ssh/config for instant re-use:
-Host *
-  ControlMaster auto
-  ControlPath ~/.ssh/cm-%r@%h:%p
-  ControlPersist 10m
+# Example:
+ssh eva
 ```
+
+If your normal local SSH setup can log in without a password, duplicated SSH panes do not ask for a password either. The recommended setup is an SSH key and a `~/.ssh/config` entry, for example:
+
+```
+Host eva
+  HostName eva
+  User jun
+  IdentityFile ~/.ssh/eva_ed25519
+  IdentitiesOnly yes
+```
+
+Then `ssh eva` works the same in every pane. If `ssh eva` still asks for a password in your regular terminal, OpenSplit will ask too.
 
 **Working directory inheritance on split.** New panes open in the working directory of the foreground process in the source pane, not in `$HOME`.
 
